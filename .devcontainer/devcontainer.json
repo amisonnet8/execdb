@@ -1,0 +1,27 @@
+{
+  "name": "execdb",
+  "image": "mcr.microsoft.com/devcontainers/go:1.26-bookworm",
+  "features": {
+    "ghcr.io/dhoeric/features/trivy:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.Go",
+        "ms-vscode.makefile-tools",
+        "cweijan.vscode-postgresql-client2",
+        "github.vscode-github-actions"
+      ],
+      "settings": {
+        "go.useLanguageServer": true,
+        "editor.formatOnSave": true,
+        "go.formatTool": "goimports"
+      }
+    }
+  },
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y make postgresql-client && go install golang.org/x/tools/gopls@latest && go install golang.org/x/tools/cmd/goimports@latest && go install golang.org/x/tools/cmd/stringer@latest",
+  "remoteUser": "vscode",
+  "containerEnv": {
+    "CGO_ENABLED": "0"
+  }
+}

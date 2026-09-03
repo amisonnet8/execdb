@@ -1,0 +1,18 @@
+{
+  "language": "japanese",
+  "permissions": {
+    "allow": [
+      "Bash(*)"
+    ],
+    "ask": [
+      "Bash(git pull*)",
+      "Bash(git fetch*)",
+      "Bash(git push*)",
+      "Bash(git clone*)",
+      "Bash(curl*)",
+      "Bash(wget*)",
+      "Bash(*install*)",
+      "Bash(go get*)"
+    ]
+  }
+}
