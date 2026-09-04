@@ -117,7 +117,12 @@ func TestSnapshotPreservesEnginePrefix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stat.Mode().Perm()&0o100 == 0 {
+	// Windows has no chmod-based execute bit -- a file's executability
+	// there is determined by its extension (.exe etc), which is
+	// cmd/execdb's responsibility (naming.md), not something engine's
+	// os.Chmod(0o755) call can express. Only check the permission bit on
+	// platforms where it means something.
+	if runtime.GOOS != "windows" && stat.Mode().Perm()&0o100 == 0 {
 		t.Errorf("expected an engine-carrying Snapshot to be executable, got mode %v", stat.Mode())
 	}
 

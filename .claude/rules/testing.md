@@ -86,3 +86,13 @@
   だった）。ワークフローに書く前に`curl -sf
   https://api.github.com/repos/<owner>/<repo>/releases/latest`等で
   `tag_name`の正確な文字列を確認すること。
+- **Windowsには`chmod`による実行ビットという概念が無い。** ファイルの
+  実行可能性は拡張子（`.exe`/`.bat`/`.cmd`等）でのみ判定されるため、
+  `os.Chmod(path, 0o755)`を呼んでも、その後`os.Stat(path).Mode().Perm()`
+  で実行ビット（`0o100`等）を確認するテストはWindowsで失敗する
+  （常に`-rw-rw-rw-`相当になる）。「拡張子を含まないファイル名に対して
+  chmodで実行可能にした」という状態をテストで検証したい場合は、
+  `runtime.GOOS != "windows"`でそのアサーションだけガードすること
+  （`GOOS=windows`への単純なクロスビルドではこの種の実行時アサーション
+  の誤りは検出できず、実際にWindowsランナー上で`go test`を走らせて
+  初めて発覚する）。
