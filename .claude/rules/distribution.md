@@ -6,8 +6,8 @@
 
 | 配布経路 | 対象ユーザー | 内容 |
 | :--- | :--- | :--- |
-| GitHub Releases のプリビルド済みバイナリ | Go環境を持たない人、初学者 | 各OS/アーキテクチャ向け（Linux/macOS/Windows × amd64/arm64 等）の空（データなし）バイナリをあらかじめビルドして配布する |
-| `go install github.com/xxx/execdb/cmd/execdb@latest` | Go開発者 | ソースからその場でビルドされた、データなし・エンジンのみのバイナリが `$GOPATH/bin` に生成される |
+| GitHub Releases のプリビルド済みバイナリ | Go環境を持たない人、初学者 | 各OS/アーキテクチャ向け（Linux/macOS/Windows × amd64/arm64 の6組み合わせ）の空（データなし）バイナリをあらかじめビルドして配布する |
+| `go install github.com/amisonnet8/execdb/cmd/execdb@latest` | Go開発者 | ソースからその場でビルドされた、データなし・エンジンのみのバイナリが `$GOPATH/bin` に生成される |
 
 **注意点:** `go install` で生成されるバイナリも、通常の `go build` と同じ
 ビルドプロセスを経るため、フッター方式による末尾へのデータ追記・読み込みは
@@ -22,3 +22,30 @@
 ため。タグ（例: `v1.0.0`）のpushをトリガーに、GitHub Actions
 （`.github/workflows/release.yml`）で各OS/アーキテクチャ向けにクロス
 コンパイルし、Releaseへ自動アップロードするパイプラインを構築する。
+
+## `release.yml`の実装（実装済み）
+
+- **トリガー:** `v*`にマッチするタグのpush。`push: tags: - 'v*'`。
+- **ビルド方式:** `CGO_ENABLED=0`のクロスコンパイルを`ubuntu-latest`
+  1台で完結させる（本体の通常ビルドと同じpure Go方針——OSごとの
+  ランナーやCコンパイラは不要。全6組み合わせが実際にビルドできることを
+  実装時に確認済み）。バージョンは`git describe`ではなく、push された
+  タグ名（`github.ref_name`）をそのまま`-ldflags -X main.version=`に
+  渡す——タグ自体がバージョンの真実の源であるリリースビルドでは、
+  こちらの方が`-dirty`サフィックス等の曖昧さがなく確実。
+- **ビルド前のゲート:** `build`ジョブの前に`check`ジョブ（`make check`）を
+  挟む。タグはmain上のコミットを指すのが通常だが、`test.yml`のCIを
+  経ていないコミットへタグを打ってしまう事故を防ぐための安全網。
+- **配布形式:** **アーカイブ化せず、生のバイナリをそのままアセットとして
+  公開する**（`execdb_<tag>_<goos>_<goarch>`、Windowsのみ`.exe`拡張子）。
+  ExecDB自体の「ダウンロードしてそのまま実行するだけ」という
+  ゼロセットアップの訴求と一貫させるための意図的な選択——tar.gz/zipへの
+  アーカイブ化はREADME/LICENSE同梱ができる代わりに、ダウンロード後の
+  展開という一手間が増える（ユーザーとの相談で決定）。各アセットには
+  `sha256sum`の出力をそのまま`.sha256`ファイルとして添付する。
+- **リリース公開:** `softprops/action-gh-release`でタグから直接リリースを
+  作成し、生成されたバイナリ・チェックサムをアセットとしてアップロードする
+  （`generate_release_notes: true`でコミット履歴から自動生成）。ドラフト
+  ではなく、タグpush時点で即座に公開される（`README.md`の「Prebuilt
+  binaries...are planned but not published yet」という記述は、初回タグ
+  push後に更新すること）。

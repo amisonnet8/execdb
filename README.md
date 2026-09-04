@@ -18,12 +18,15 @@ box, with their own default connection settings.
 
 ## Install
 
-Requires Go 1.26+. (Prebuilt binaries via GitHub Releases are planned but
-not published yet — `go install` is the only path for now.)
-
 ```sh
 go install github.com/amisonnet8/execdb/cmd/execdb@latest
 ```
+
+Requires Go 1.26+. Prebuilt binaries for Linux/macOS/Windows (amd64/arm64)
+are published automatically to [GitHub Releases](https://github.com/amisonnet8/execdb/releases)
+whenever a version tag is pushed — grab the one for your platform if you'd
+rather not build from source. No release has been tagged yet as of this
+writing.
 
 ## Quickstart
 

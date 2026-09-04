@@ -19,12 +19,16 @@ DBエンジンとデータ領域を1つの実行ファイル内に保持する�
 
 ## インストール
 
-Go 1.26以降が必要です（GitHub Releasesでのビルド済みバイナリ配布は計画中
-ですが、まだ公開していません。現時点では`go install`のみが導入手段です）。
-
 ```sh
 go install github.com/amisonnet8/execdb/cmd/execdb@latest
 ```
+
+Go 1.26以降が必要です。Linux/macOS/Windows（amd64/arm64）向けのビルド済み
+バイナリは、バージョンタグをpushするたびに
+[GitHub Releases](https://github.com/amisonnet8/execdb/releases)へ自動公開
+されます。ソースからビルドしたくない場合はそちらから該当プラットフォーム用の
+ファイルを取得してください（この文書作成時点では、まだタグをpushしておらず
+リリースはありません）。
 
 ## クイックスタート
 

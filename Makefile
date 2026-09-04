@@ -1,6 +1,9 @@
 BIN         := bin/execdb
 PKG         := ./cmd/execdb
-VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# main.go's banner ("ExecDB v%s") adds its own "v" prefix, so a leading "v"
+# is stripped here -- git describe echoes a "v1.0.0"-style tag verbatim,
+# which would otherwise print as "ExecDB vv1.0.0" once any tag exists.
+VERSION     ?= $(shell (git describe --tags --always --dirty 2>/dev/null || echo dev) | sed 's/^v//')
 BUILD_FLAGS := -trimpath
 LDFLAGS     := -s -w -X main.version=$(VERSION)
 

@@ -1,0 +1,106 @@
+name: release
+
+# .claude/rules/distribution.md: prebuilt, data-less "engine only" binaries
+# for each OS/architecture, published as GitHub Releases assets, triggered
+# by pushing a version tag (e.g. v1.0.0). Never committed to the repository
+# itself.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # A tag can in principle point at a commit that never went through
+  # test.yml (a local tag pushed before its commit finished CI on main,
+  # for instance) -- this re-runs the fast checks as a gate before
+  # spending time cross-compiling and publishing anything.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: make check
+        run: make check
+
+  build:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # CGO_ENABLED=0: matches this repo's normal build (binary-size.md /
+      # directory-structure.md's pure-Go stance) and is what makes
+      # single-host cross-compilation for every target possible here
+      # without per-OS runners or a C cross-toolchain.
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          ext=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
+          # main.go's banner ("ExecDB v%s") adds its own "v" prefix, so it
+          # is stripped from main.version here -- passing the tag as-is
+          # (v1.0.0) would print "ExecDB vv1.0.0" (Makefile has the same
+          # fix, for local git-describe-based dev builds).
+          version="${GITHUB_REF_NAME#v}"
+          name="execdb_${GITHUB_REF_NAME}_${{ matrix.goos }}_${{ matrix.goarch }}$ext"
+          go build -trimpath -ldflags "-s -w -X main.version=$version" -o "$name" ./cmd/execdb
+          sha256sum "$name" > "$name.sha256"
+          echo "ASSET=$name" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: execdb_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # merge-multiple: the per-matrix-job artifacts (each named
+      # execdb_<goos>_<goarch>) are collapsed into one flat dist/ directory
+      # rather than nested under their artifact names, so `files: dist/*`
+      # below picks up every binary + checksum in one glob.
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          generate_release_notes: true

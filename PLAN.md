@@ -296,6 +296,35 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
   スクリプトで解決確認済み。`.claude/rules/directory-structure.md`の
   ツリー図・補足説明を新しい`docs/`構成に合わせて更新（`tests/`と
   `docs/examples/`の役割の違いも明記）。`make check`・`make test`とも green
+- **`.github/workflows/release.yml`（GitHub Releasesへの自動配布）完了
+  （2026-09-04）。** Step 10（`tour/`）着手前に、ユーザー指示で
+  `.claude/rules/distribution.md`が以前から構想として記していたリリース
+  パイプラインを実装。`v*`タグのpushをトリガーに、`ubuntu-latest`1台上で
+  `CGO_ENABLED=0`のクロスコンパイル（Linux/macOS/Windows × amd64/arm64の
+  全6組み合わせ、実装時に全パターンのビルド成功を実測確認済み）を行い、
+  `softprops/action-gh-release`でリリースを作成・アセットをアップロードする。
+  ビルド前に`make check`を通すゲートジョブを挟む（タグがCI未通過のコミットを
+  指す事故への安全網）。**配布アセットの形式はユーザーと相談し、tar.gz/zipへの
+  アーカイブ化はせず生のバイナリをそのまま公開する方針に決定**（ExecDB自身の
+  「ダウンロードしてそのまま実行するだけ」というゼロセットアップの訴求と
+  一貫させるため）。各アセットには`sha256sum`出力を添付。
+  - **実装中に発見・修正した既存バグ**: `main.go`のバナーは
+    `fmt.Fprintf(..., "ExecDB v%s", version)`で`version`自体には`v`を
+    含まない前提（デフォルト値`"dev"`）だが、`Makefile`の
+    `VERSION ?= $(shell git describe --tags --always --dirty ...)`は
+    タグ名（`v1.0.0`のような`v`付き）をそのまま返すため、**タグが1つでも
+    存在する状態でビルドすると`ExecDB vv1.0.0`と二重表示される**、
+    これまでタグが1つも無かったため誰も踏んでいなかった潜在バグを発見した。
+    ローカルに一時タグ（未push、検証後削除）を打って実際に再現・修正確認
+    済み。`Makefile`（`sed 's/^v//'`でパイプ）・`release.yml`（bashの
+    `${GITHUB_REF_NAME#v}`展開）の両方で同じ修正を適用
+  - `make check`・実機での全6組み合わせクロスビルド確認・YAML構文検証・
+    ワークフロー内シェルロジックのローカルシミュレーションで確認済み
+    （実際のタグpush・GitHub Actions上での実行はまだ——次にユーザーが
+    バージョンタグをpushした時点が初回実行になる）
+  - `README.md`/`README_ja.md`のインストール節を、GitHub Releasesが
+    自動公開される旨の説明に更新（まだ1件もタグをpushしていないため
+    「リリースはまだ無い」旨も明記）
 - **フェーズ③Step 1（REPL基盤の再構築）完了（2026-09-04）。**
   - `cmd/execdb/access.go`: `splitStatements`から`scanStatements(sql) (complete []string,
     remainder string)`を切り出し（`splitStatements`はremainderが非空白なら末尾へ追加する
