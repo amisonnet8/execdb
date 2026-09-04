@@ -9,6 +9,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -43,18 +44,20 @@ func run(connString string) error {
 	}
 	defer conn.Close(ctx)
 
-	// Scan into *string, not *int: phase 1 reports every column as OID 25
-	// (text) regardless of its actual SQLite affinity
-	// (.claude/rules/pgwire.md's "決め打ちで実装せず実接続で確定" applies
-	// to the real type mapping, deferred to phase 4). pgx enforces this
-	// strictly -- unlike psql's text-rendering CLI, it refuses to scan a
-	// column declared as text into *int at all.
-	var one string
+	// Scan into *int64/*float64/[]byte, not *string: phase 4 Step 2 maps
+	// each column to a real Postgres OID (int8/float8/text/bytea/etc.,
+	// cmd/execdb/pgtype.go) based on its SQLite declared type, rather than
+	// phase 1's OID-25-for-everything placeholder
+	// (.claude/rules/pgwire.md). pgx enforces the declared type strictly
+	// -- unlike psql's text-rendering CLI, it refuses to scan a column
+	// declared as text into *int at all, so this exercises the mapping
+	// end-to-end, not just that a query runs.
+	var one int64
 	if err := conn.QueryRow(ctx, "SELECT 1").Scan(&one); err != nil {
 		return fmt.Errorf("SELECT 1: %w", err)
 	}
-	if one != "1" {
-		return fmt.Errorf("SELECT 1 returned %q, want %q", one, "1")
+	if one != 1 {
+		return fmt.Errorf("SELECT 1 returned %d, want %d", one, 1)
 	}
 
 	var s string
@@ -63,6 +66,22 @@ func run(connString string) error {
 	}
 	if s != "hello" {
 		return fmt.Errorf("SELECT 'hello' returned %q, want %q", s, "hello")
+	}
+
+	var f float64
+	if err := conn.QueryRow(ctx, "SELECT 3.5").Scan(&f); err != nil {
+		return fmt.Errorf("SELECT 3.5: %w", err)
+	}
+	if f != 3.5 {
+		return fmt.Errorf("SELECT 3.5 returned %v, want %v", f, 3.5)
+	}
+
+	var blob []byte
+	if err := conn.QueryRow(ctx, "SELECT x'00ff'").Scan(&blob); err != nil {
+		return fmt.Errorf("SELECT x'00ff': %w", err)
+	}
+	if !bytes.Equal(blob, []byte{0x00, 0xff}) {
+		return fmt.Errorf("SELECT x'00ff' returned % x, want % x", blob, []byte{0x00, 0xff})
 	}
 
 	var null *string
@@ -136,7 +155,7 @@ func checkTransactionIsolation(ctx context.Context, connString string) error {
 	// proves isolation via serialization (B never observes a half-done
 	// state) rather than true concurrent snapshot isolation.
 	type result struct {
-		n   string
+		n   int64
 		err error
 	}
 	done := make(chan result, 1)
@@ -156,8 +175,8 @@ func checkTransactionIsolation(ctx context.Context, connString string) error {
 		if r.err != nil {
 			return fmt.Errorf("B SELECT: %w", r.err)
 		}
-		if r.n != "1" {
-			return fmt.Errorf("B saw count=%s after A committed, want 1", r.n)
+		if r.n != 1 {
+			return fmt.Errorf("B saw count=%d after A committed, want 1", r.n)
 		}
 	case <-time.After(10 * time.Second):
 		return errors.New("B's read did not return after A committed")
@@ -200,12 +219,12 @@ func checkFailedTransactionState(ctx context.Context, connString string) error {
 		return fmt.Errorf("ROLLBACK: %w", err)
 	}
 
-	var one string
+	var one int64
 	if err := conn.QueryRow(ctx, "SELECT 1").Scan(&one); err != nil {
 		return fmt.Errorf("SELECT 1 after ROLLBACK: %w", err)
 	}
-	if one != "1" {
-		return fmt.Errorf("SELECT 1 after ROLLBACK returned %q, want %q", one, "1")
+	if one != 1 {
+		return fmt.Errorf("SELECT 1 after ROLLBACK returned %d, want %d", one, 1)
 	}
 	return nil
 }
@@ -236,12 +255,12 @@ func checkDisconnectDuringQuery(ctx context.Context, connString string) error {
 		return fmt.Errorf("reconnect after a canceled query: %w", err)
 	}
 	defer verify.Close(ctx)
-	var one string
+	var one int64
 	if err := verify.QueryRow(ctx, "SELECT 1").Scan(&one); err != nil {
 		return fmt.Errorf("SELECT 1 after reconnect: %w", err)
 	}
-	if one != "1" {
-		return fmt.Errorf("SELECT 1 after reconnect returned %q, want %q", one, "1")
+	if one != 1 {
+		return fmt.Errorf("SELECT 1 after reconnect returned %d, want %d", one, 1)
 	}
 	return nil
 }

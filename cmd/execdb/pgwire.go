@@ -307,9 +307,13 @@ func execOneStatement(ctx context.Context, conn net.Conn, sess *engine.Session, 
 }
 
 func sendRows(conn net.Conn, rows *sql.Rows) (ok bool, err error) {
-	cols, cerr := rows.Columns()
+	cts, cerr := rows.ColumnTypes()
 	if cerr != nil {
 		return false, writeErrorResponse(conn, sqlstateGeneric, cerr.Error())
+	}
+	cols := make([]pgColumn, len(cts))
+	for i, ct := range cts {
+		cols[i] = pgColumn{name: ct.Name(), oid: columnOID(ct)}
 	}
 	if err := writeRowDescription(conn, cols); err != nil {
 		return false, err
@@ -328,11 +332,7 @@ func sendRows(conn net.Conn, rows *sql.Rows) (ok bool, err error) {
 		}
 		fields := make([]*string, len(cols))
 		for i, v := range vals {
-			if v == nil {
-				continue
-			}
-			s := formatValue(v)
-			fields[i] = &s
+			fields[i] = pgEncodeValue(cols[i].oid, v)
 		}
 		if err := writeDataRow(conn, fields); err != nil {
 			return false, err

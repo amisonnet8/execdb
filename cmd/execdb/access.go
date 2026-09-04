@@ -113,14 +113,112 @@ func scanStatements(sql string) (complete []string, remainder string) {
 // rows (so callers should use Query/QueryContext rather than
 // Exec/ExecContext). This is a keyword check, not a real parser --
 // adequate for the REPL and pgwire's row/no-row dispatch, both of which
-// only need to pick the right database/sql method.
+// only need to pick the right database/sql method. INSERT/UPDATE/DELETE
+// only return rows when they carry a RETURNING clause (SQLite 3.35+); the
+// leading keyword alone cannot tell those apart, so hasReturningClause
+// scans the rest of the statement.
 func looksLikeRowReturning(stmt string) bool {
 	s := strings.TrimLeft(stmt, "( \t\r\n")
 	switch firstKeyword(s) {
 	case "SELECT", "PRAGMA", "EXPLAIN", "VALUES", "WITH":
 		return true
+	case "INSERT", "UPDATE", "DELETE":
+		return hasReturningClause(stmt)
 	}
 	return false
+}
+
+// hasReturningClause reports whether stmt contains a top-level RETURNING
+// keyword (SQLite 3.35+'s INSERT/UPDATE/DELETE ... RETURNING ...). It
+// skips string/identifier literals and comments the same way scanStatements
+// does, so a column or alias literally named "returning" does not cause a
+// false match.
+func hasReturningClause(stmt string) bool {
+	runes := []rune(stmt)
+	n := len(runes)
+	i := 0
+	for i < n {
+		c := runes[i]
+		switch {
+		case c == '\'':
+			i++
+			for i < n {
+				if runes[i] == '\'' {
+					i++
+					if i < n && runes[i] == '\'' {
+						i++
+						continue
+					}
+					break
+				}
+				i++
+			}
+			continue
+		case c == '"':
+			i++
+			for i < n && runes[i] != '"' {
+				i++
+			}
+			if i < n {
+				i++
+			}
+			continue
+		case c == '-' && i+1 < n && runes[i+1] == '-':
+			for i < n && runes[i] != '\n' {
+				i++
+			}
+			continue
+		case c == '/' && i+1 < n && runes[i+1] == '*':
+			i += 2
+			for i+1 < n && !(runes[i] == '*' && runes[i+1] == '/') {
+				i++
+			}
+			if i+1 < n {
+				i += 2
+			} else {
+				i = n
+			}
+			continue
+		default:
+			if matchesWordAt(runes, i, "RETURNING") {
+				return true
+			}
+			i++
+		}
+	}
+	return false
+}
+
+// matchesWordAt reports whether word (matched case-insensitively) occurs at
+// runes[i], bounded by non-word characters (or the start/end of runes) on
+// both sides, so it only matches a whole keyword, not a substring of a
+// longer identifier.
+func matchesWordAt(runes []rune, i int, word string) bool {
+	wr := []rune(word)
+	if i+len(wr) > len(runes) {
+		return false
+	}
+	for j, w := range wr {
+		r := runes[i+j]
+		if r >= 'a' && r <= 'z' {
+			r -= 'a' - 'A'
+		}
+		if r != w {
+			return false
+		}
+	}
+	if i > 0 && isWordRune(runes[i-1]) {
+		return false
+	}
+	end := i + len(wr)
+	if end < len(runes) && isWordRune(runes[end]) {
+		return false
+	}
+	return true
+}
+
+func isWordRune(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
 }
 
 // firstKeyword returns the first SQL keyword in stmt, skipping leading

@@ -295,12 +295,11 @@ func jsonScalar(v any) string {
 	}
 }
 
-// formatValue renders a single scanned column value as plain text.
-// Shared by the "list"/"column"/"line"/"csv" REPL modes above and by
-// pgwire's DataRow output (cmd/execdb/pgwire.go), which always sends
-// text-format values regardless of the REPL's own display mode (spec
-// §8's type mapping is still phase 4 future work -- see
-// .claude/rules/pgwire.md).
+// formatValue renders a single scanned column value as plain text, for the
+// REPL's "list"/"column"/"line"/"csv" display modes above. pgwire has its
+// own separate value encoder, pgEncodeValue (pgtype.go), since PostgreSQL's
+// wire text format has per-OID rules (e.g. bytea's "\x" hex prefix) that
+// differ from this REPL-display formatting.
 func formatValue(v any) string {
 	switch x := v.(type) {
 	case nil:

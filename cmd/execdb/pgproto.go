@@ -146,28 +146,28 @@ func writeReadyForQuery(w io.Writer, status byte) error {
 	return writeMessage(w, 'Z', func(b *msgBuilder) { b.byte(status) })
 }
 
-// writeRowDescription describes cols. Phase 1 does not implement a type
-// mapping (.claude/rules/pgwire.md: "決め打ちで実装せず実接続で確定"), so
-// every column is reported as OID 25 (text) in text format, matching
-// execSQL's/pgwire's own text-only value formatting.
-func writeRowDescription(w io.Writer, cols []string) error {
+// writeRowDescription describes cols, each carrying the OID
+// columnOID (pgtype.go) chose for it (spec §8's type mapping, phase 4).
+// Values are still always sent in text format (format code 0) --
+// PostgreSQL's binary format is not implemented.
+func writeRowDescription(w io.Writer, cols []pgColumn) error {
 	return writeMessage(w, 'T', func(b *msgBuilder) {
 		b.int16(int16(len(cols)))
-		for _, name := range cols {
-			b.cstring(name)
-			b.int32(0)  // table OID: none
-			b.int16(0)  // column attribute number: none
-			b.int32(25) // data type OID: text
-			b.int16(-1) // data type size: variable-length
-			b.int32(-1) // type modifier: none
-			b.int16(0)  // format code: text
+		for _, c := range cols {
+			b.cstring(c.name)
+			b.int32(0)               // table OID: none
+			b.int16(0)               // column attribute number: none
+			b.int32(int32(c.oid))    // data type OID
+			b.int16(pgTypLen(c.oid)) // data type size
+			b.int32(-1)              // type modifier: none
+			b.int16(0)               // format code: text
 		}
 	})
 }
 
 // writeDataRow sends one row. A nil entry in values encodes SQL NULL
-// (length -1, no bytes); the driver in this package produces values via
-// formatValue (format.go), the same stringification used by REPL output.
+// (length -1, no bytes); pgwire.go's sendRows produces values via
+// pgEncodeValue (pgtype.go), matching each field's RowDescription OID.
 func writeDataRow(w io.Writer, values []*string) error {
 	return writeMessage(w, 'D', func(b *msgBuilder) {
 		b.int16(int16(len(values)))

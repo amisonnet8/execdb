@@ -58,7 +58,8 @@ func TestWriteCommandComplete(t *testing.T) {
 
 func TestWriteRowDescription(t *testing.T) {
 	var buf bytes.Buffer
-	if err := writeRowDescription(&buf, []string{"a", "b"}); err != nil {
+	cols := []pgColumn{{name: "a", oid: oidInt8}, {name: "b", oid: oidText}}
+	if err := writeRowDescription(&buf, cols); err != nil {
 		t.Fatal(err)
 	}
 	if buf.Bytes()[0] != 'T' {
@@ -68,6 +69,23 @@ func TestWriteRowDescription(t *testing.T) {
 	numFields := binary.BigEndian.Uint16(body[0:2])
 	if numFields != 2 {
 		t.Fatalf("numFields = %d, want 2", numFields)
+	}
+
+	// field 1 ("a"): cstring name, Int32 table OID, Int16 attnum, Int32
+	// type OID, Int16 typlen, Int32 typmod, Int16 format code.
+	off := 2
+	if string(body[off:off+2]) != "a\x00" {
+		t.Fatalf("field 1 name = %q, want \"a\\x00\"", body[off:off+2])
+	}
+	off += 2 + 4 + 2 // name + table OID + attnum
+	gotOID := binary.BigEndian.Uint32(body[off : off+4])
+	if gotOID != oidInt8 {
+		t.Errorf("field 1 OID = %d, want %d (int8)", gotOID, oidInt8)
+	}
+	off += 4
+	gotTypLen := int16(binary.BigEndian.Uint16(body[off : off+2]))
+	if gotTypLen != 8 {
+		t.Errorf("field 1 typlen = %d, want 8", gotTypLen)
 	}
 }
 

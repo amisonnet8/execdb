@@ -274,9 +274,10 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
-- 現在のフェーズ: **④PostgreSQL互換ワイヤープロトコル開発、計画立案・
-  Step 1（スパイク）完了**。次はStep 2（型マッピング）から。詳細は下記
-  「フェーズ④のステップ」節・「フェーズ④Step 1で確定した事実」節を参照。
+- 現在のフェーズ: **④PostgreSQL互換ワイヤープロトコル開発、Step 2
+  （型マッピング）完了**。次はStep 3（`SET`/`SHOW`互換シム）から。詳細は
+  下記「フェーズ④のステップ」節・「フェーズ④Step 2（型マッピング）完了」
+  節を参照。
 - **フェーズ③Step 1（REPL基盤の再構築）完了（2026-09-04）。**
   - `cmd/execdb/access.go`: `splitStatements`から`scanStatements(sql) (complete []string,
     remainder string)`を切り出し（`splitStatements`はremainderが非空白なら末尾へ追加する
@@ -1087,6 +1088,54 @@ Extended Queryのメッセージフロー自体はPostgreSQLプロトコル仕�
 差異（pgJDBCの`SET`送出等、P4-2で既知）に対して都度対応する**方針とする
 （フェーズ③がStep 3→Step 4で実施したのと同じ「実装→実機確認→ギャップ
 発覚→追加対応」のサイクルを踏襲）。
+
+## フェーズ④Step 2（型マッピング）完了（2026-09-04）
+
+Step 1のスパイクで確定した方針（宣言型ベースのアフィニティ判定を第一優先、
+式・集約列のみ先頭行の実測値へフォールバック）をそのまま実装。
+
+- `cmd/execdb/pgtype.go`（新規）: OID定数（`bool`16/`bytea`17/`int8`20/
+  `text`25/`float8`701/`timestamp`1114/`numeric`1700）。`columnOID(*sql.ColumnType)`
+  が`DatabaseTypeName()`（宣言型）を`affinityOID`（SQLite公式の型アフィニティ
+  判定アルゴリズムを実装、`BOOLEAN`/`DATE`系はアフィニティ判定より優先する
+  特別扱い）へ通し、宣言型が空（式・集約・リテラル列）の場合のみ
+  `scanTypeOID`（`ScanType()`ベース）にフォールバック。`pgEncodeValue(oid, v)`が
+  実際にScanされたGoの動的型を型スイッチしてPostgresテキスト形式へ変換
+  （BLOB→`\x`+16進、REAL→`strconv.FormatFloat`＋NaN/Infinity特別扱い、
+  `BOOLEAN`列のint64値→`t`/`f`——Step 1で発見した「宣言型はBOOLEANなのに
+  Scan結果はint64」という不一致をここで吸収）。`pgTypLen(oid)`で
+  RowDescriptionの固定長フィールドを返す
+- `cmd/execdb/pgproto.go`: `writeRowDescription`の引数を`[]string`から
+  `[]pgColumn{name, oid}`へ変更し、実際のOID・typlenを送るように
+  （旧: 全列OID 25 text固定）
+- `cmd/execdb/pgwire.go`: `sendRows`が`rows.Columns()`ではなく
+  `rows.ColumnTypes()`から`pgColumn`を組み立て、`formatValue`ではなく
+  `pgEncodeValue`で値をエンコードするよう変更
+- `cmd/execdb/format.go`: `formatValue`のdocコメントを更新
+  （「フェーズ4で対応」という古い記述を、pgwireは別エンコーダ
+  `pgEncodeValue`を持つという実装済みの説明へ差し替え）
+- **副産物: `looksLikeRowReturning`（`access.go`）の既存の抜けを発見・修正。**
+  `INSERT/UPDATE/DELETE ... RETURNING`（SQLite 3.35+）は本来行を返すが、
+  先頭キーワードだけを見る従来の判定では常に`false`になり、Simple Query
+  経由でも`ExecContext`に回されてRETURNING結果が握りつぶされていた。
+  `hasReturningClause`（クォート・コメントを考慮したトップレベルの
+  `RETURNING`キーワード検出、`matchesWordAt`で単語境界も判定）を追加し、
+  `INSERT`/`UPDATE`/`DELETE`は`RETURNING`句の有無で判定するよう修正
+- 新規テスト: `pgtype_test.go`（宣言型別・式/集約列・アフィニティ違反値の
+  `columnOID`、`affinityOID`の網羅、`pgEncodeValue`のNaN/Infinity/BLOB/
+  BOOLEAN込みテーブル駆動テスト）、`pgproto_test.go`の
+  `TestWriteRowDescription`をOID/typlenまで検証する形へ拡張、
+  `access_test.go`に`RETURNING`句の検出・非検出（文字列/識別子内の
+  "returning"に反応しないこと含む）を追加
+- `tests/pgclient/main.go`: `*string`固定Scanを`*int64`/`*float64`/`[]byte`
+  への直接Scanへ変更（型が実際に機能していることの検証に変更）。
+  トランザクション分離・失敗状態・切断系のチェックも`SELECT 1`/
+  `count(*)`の戻り値を`int64`で比較する形に追従
+- **実機確認（`psql`でサーバーモード起動、`SELECT`で確認）**: INTEGER/REAL列が
+  右詰め表示（psqlが数値OIDと認識）、TEXT列は左詰め、BLOB列が`\x00ff`形式、
+  BOOLEAN列の実体（int64の0/1）が`t`として正しく表示されることを確認
+- `make check`・`make race`・`make test`（e2e、`tests/pgclient`実行含め
+  全項目PASS）とも green を確認済み。依存追加なし
 
 ## フェーズ④への申し送り
 

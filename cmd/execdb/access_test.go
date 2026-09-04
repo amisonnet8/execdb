@@ -145,6 +145,10 @@ func TestLooksLikeRowReturning(t *testing.T) {
 		"WITH x AS (SELECT 1) SELECT * FROM x",
 		"-- comment\nSELECT 1",
 		"(SELECT 1)",
+		"INSERT INTO t VALUES (1) RETURNING *",
+		"insert into t values (1) returning id",
+		"UPDATE t SET a = 1 RETURNING a",
+		"DELETE FROM t WHERE a = 1 RETURNING a",
 	}
 	for _, stmt := range rowReturning {
 		if !looksLikeRowReturning(stmt) {
@@ -158,6 +162,10 @@ func TestLooksLikeRowReturning(t *testing.T) {
 		"DELETE FROM t",
 		"CREATE TABLE t(a)",
 		"BEGIN",
+		// "returning" appearing only inside a string literal or a
+		// quoted identifier must not trigger a false match.
+		"INSERT INTO t(note) VALUES ('a returning value')",
+		`INSERT INTO "returning_log" VALUES (1)`,
 	}
 	for _, stmt := range notRowReturning {
 		if looksLikeRowReturning(stmt) {
