@@ -136,8 +136,8 @@ DSN（`file:execdb?mode=memory&cache=shared`）を使っていても、`Deserial
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
-- 現在のフェーズ: ①ミニマム実装 — **Step 4完了**、Step 5（E2E自動化・
-  他言語ドライバ確認・CI）着手前
+- 現在のフェーズ: **①ミニマム実装（技術検証フェーズ）完了**。次はフェーズ②
+  （`engine`ライブラリ開発）の計画立案から。
 - 下準備として以下を作成済み（2026-09-03時点）:
   - `go.mod`（module: `github.com/amisonnet8/execdb`）
   - `LICENSE`（MIT, copyright: amisonnet8）
@@ -237,11 +237,50 @@ DSN（`file:execdb?mode=memory&cache=shared`）を使っていても、`Deserial
     UDSのlibpq命名規則制約、複数クライアント同時トランザクションの真の
     分離は未対応（`engine.DB`が単一keeperコネクション経由のため）という
     既知の制約
-- 次のアクション: Step 5（`examples/e2e.sh`によるE2E自動化、
-  `examples/pgclient`でのpgx接続確認、`go install`でのフッター方式動作
-  確認、GitHub Actions 3OSマトリクス、仕様書・ルールファイルへの最終反映）
-  に着手する。
+- Step 5で以下を実施済み（2026-09-04時点）:
+  - `examples/pgclient/main.go`（pgx v5。`SELECT 1`/`SELECT 'hello'`/
+    `SELECT NULL`の読み取りと、DDL拒否時に`*pgconn.PgError`として
+    SQLSTATE 42501が正しく届くことを検証。examples専用の依存として
+    `go.mod`に追加、`cmd/execdb`の依存グラフには含まれないことを
+    `go list -deps ./cmd/execdb | grep jackc`で確認済み）
+  - `examples/e2e.sh`（`make test`の実体）: REPLのCRUD、`.snapshot`→
+    単体起動、`.load`、`.overwrite`（コピーに対して実行）、pgwire TCP
+    （`psql`のSELECT・DDL/ATTACH拒否・複文バイパス拒否）、
+    `examples/pgclient`実行、pgwire UDS、`go install`後のフッター/
+    `.overwrite`動作まで、すべて自動化・全PASS
+  - **e2e.sh実装中に発覚した重要な事実（`.claude/rules/pgwire.md`・
+    `testing.md`へ追記済み）**:
+    - `pgx`はデフォルトでExtended Queryプロトコルを使うため、接続文字列に
+      `default_query_exec_mode=simple_protocol`を付与しないとExecDBに
+      接続できない（`psql`はデフォルトでSimple Queryなので気づかない）
+    - 全列OID 25(text)固定の暫定実装は、`pgx`の厳格な型チェックにより
+      「数値列でも`*string`でScanする必要がある」という形で実際に制約と
+      して顕在化する（`psql`では気づかない）
+    - bashの`wait`組み込みは「コマンド置換のサブシェル経由で得たPID」には
+      使えない（`kill -0`ポーリングに置き換えて対処）。サーバーモード
+      プロセスは作業ディレクトリ相対で自動保存するため、バックグラウンド
+      起動時は`(cd "$WORK" && exec ...)`で明示的に切り替える必要がある
+  - `golang.org/x/text`にHIGH深刻度のCVE（CVE-2026-56852）が`trivy`で
+    検出され、v0.41.0へアップグレードして解消（pgx経由の間接依存）
+  - `.github/workflows/test.yml`: ubuntu/macos/windows × Go 1.26で
+    `make check`（Windowsは`choco install make`を前段で実行）、および
+    別ジョブで`trivy`（vuln+license、HIGH/CRITICALで失敗）を追加
+    ——**ただし未pushのため、実際にCI上でgreenになることは未確認**
+    （次回pushする機会に確認すること）
+  - `make check`・`make test`とも問題なし、`trivy`もクリーン
+- **フェーズ①完了の判定（PLAN.md記載の基準、すべて満たした）**:
+  `make check`・`make test`が通る／`psql`と`examples/pgclient`（pgx）の
+  両方から疎通しDDL系が拒否される／`go install`で入れたバイナリでも
+  `.snapshot`/`.overwrite`が機能する（3点確認済み）。GitHub Actions
+  3OSマトリクスは追加したが実行未確認（push待ち）。
+- 次のアクション: フェーズ②（`engine`ライブラリ開発）の計画を立てる。
+  着手前に、Step 2/4で申し送った既知の制約（複数クライアント同時
+  トランザクションの真の分離が`engine.DB`の単一keeperコネクション設計では
+  未対応な点）への対応方針を含めて設計を検討すること。
 
 ## 保留事項
 
-（なし。`Makefile`・自動フックともにStep 1で確定・設定済み。）
+- **GitHub Actions CIの実行確認**: `.github/workflows/test.yml`を追加した
+  が、リモートへpushしていないため実際にワークフローが動く・3OSとも
+  greenになることは未確認。次回pushするタイミングで確認し、問題があれば
+  修正すること。

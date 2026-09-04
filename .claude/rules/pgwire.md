@@ -59,6 +59,28 @@ TCPとUNIX Domain Socketの両方に対応する。同一のプロトコル実�
   `SELECT`/DDL拒否/複文バイパス拒否/TCP+UDS同時待受/stale socket除去まで
   確認済み）で判明した。
 
+## 実装時の気づき（フェーズ①Step 5、`pgx`実接続で確認）
+
+- **`pgx`（Go）はデフォルトでExtended Queryプロトコル（`Parse`/`Bind`/
+  `Execute`）を使う。** ExecDBはSimple Queryのみ実装しているため、何も
+  指定しないと`conn.QueryRow`等の初回呼び出しで`unsupported message type
+  'P'`エラーになる。接続文字列に`default_query_exec_mode=simple_protocol`
+  を付与すると、`pgx`はSimple Queryのみを使うようになり接続できる
+  （`examples/pgclient`のusageメッセージ・`examples/e2e.sh`参照）。`psql`は
+  デフォルトでSimple Queryを使うため、この問題は`psql`では顕在化しない
+  ——つまり「`psql`で繋がった」だけでは他ドライバの互換性を保証しない、
+  という教訓でもある。フェーズ④で他ドライバ確認する際は、まずデフォルト
+  設定で試し、Extended Query前提のドライバであれば同様の「Simple Query
+  強制」オプションの有無を確認すること。
+- **全列をOID 25(text)固定で返す実装（フェーズ①の暫定仕様）は、`pgx`の
+  型チェックの厳しさによって実際に制約として顕在化する。** `psql`は
+  テキスト表示するだけなので気づきにくいが、`pgx`は`RowDescription`の
+  型情報を厳格に見ており、text型の列を`*int`へ`Scan`しようとすると
+  `cannot scan text (OID 25) in text format into *int`のようなエラーで
+  拒否される（`*string`へのScanは常に成功する）。フェーズ④で本来の型
+  マッピングを実装するまでは、`pgx`等の型に厳格なドライバから使う場合、
+  呼び出し側は数値列であっても文字列としてScanする必要がある。
+
 ## 既知の制約: トランザクションの真の並行分離は未対応（フェーズ①）
 
 `.claude/rules/sqlite-quirks.md`が記録している通り、`engine.DB`の`Exec`/`Query`/
