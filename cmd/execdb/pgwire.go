@@ -102,6 +102,7 @@ func handleConnection(conn net.Conn, db *engine.DB) {
 	}
 	defer sess.Close()
 
+	params := newSessionParams(startupParameterStatus())
 	txState := byte('I')
 	for {
 		msg, err := readFrontendMessage(conn)
@@ -111,7 +112,7 @@ func handleConnection(conn net.Conn, db *engine.DB) {
 		switch msg.Type {
 		case 'Q':
 			stop := watchForDisconnect(conn, cancel)
-			txState, err = handleSimpleQuery(ctx, conn, sess, txState, cStringFromBody(msg.Body))
+			txState, err = handleSimpleQuery(ctx, conn, sess, params, txState, cStringFromBody(msg.Body))
 			stop()
 			if err != nil {
 				return
@@ -203,11 +204,13 @@ func performHandshake(conn net.Conn) bool {
 	}
 }
 
-func sendStartupResponse(conn net.Conn) error {
-	if err := writeAuthenticationOk(conn); err != nil {
-		return err
-	}
-	params := [][2]string{
+// startupParameterStatus is the list of ParameterStatus values ExecDB
+// reports to every client at connection time (spec §8's handshake). It
+// also seeds that connection's sessionParams (pgsession.go's
+// newSessionParams), so a SHOW before any SET reports the same value the
+// client was already told at startup.
+func startupParameterStatus() [][2]string {
+	return [][2]string{
 		{"server_version", "13.0 (ExecDB " + version + ")"},
 		{"client_encoding", "UTF8"},
 		{"standard_conforming_strings", "on"},
@@ -215,7 +218,13 @@ func sendStartupResponse(conn net.Conn) error {
 		{"TimeZone", "UTC"},
 		{"integer_datetimes", "on"},
 	}
-	for _, kv := range params {
+}
+
+func sendStartupResponse(conn net.Conn) error {
+	if err := writeAuthenticationOk(conn); err != nil {
+		return err
+	}
+	for _, kv := range startupParameterStatus() {
 		if err := writeParameterStatus(conn, kv[0], kv[1]); err != nil {
 			return err
 		}
@@ -231,7 +240,9 @@ func sendStartupResponse(conn net.Conn) error {
 // the way real PostgreSQL's ReadyForQuery status byte does: txState is
 // 'I' (idle), 'T' (inside a transaction), or 'E' (inside a transaction
 // that hit an error and can no longer execute anything but
-// COMMIT/ROLLBACK). It returns the state after processing query.
+// COMMIT/ROLLBACK). SET/SHOW are intercepted (handleSessionCommand,
+// pgsession.go) before reaching SQLite and leave txState unchanged. It
+// returns the state after processing query.
 //
 // A returned error means the connection itself failed (including its
 // context being canceled -- e.g. by watchForDisconnect) and the caller
@@ -239,7 +250,7 @@ func sendStartupResponse(conn net.Conn) error {
 // and simply stops the rest of this batch (matching real PostgreSQL,
 // which does not run later statements in a multi-statement message after
 // one fails).
-func handleSimpleQuery(ctx context.Context, conn net.Conn, sess *engine.Session, txState byte, query string) (byte, error) {
+func handleSimpleQuery(ctx context.Context, conn net.Conn, sess *engine.Session, params sessionParams, txState byte, query string) (byte, error) {
 	if strings.TrimSpace(query) == "" {
 		return txState, nil
 	}
@@ -254,10 +265,11 @@ func handleSimpleQuery(ctx context.Context, conn net.Conn, sess *engine.Session,
 	}
 
 	for _, stmt := range splitStatements(query) {
-		if strings.TrimSpace(stmt) == "" {
+		trimmed := strings.TrimSpace(stmt)
+		if trimmed == "" {
 			continue
 		}
-		kw := firstKeyword(stmt)
+		kw := firstKeyword(trimmed)
 
 		if txState == 'E' && kw != "COMMIT" && kw != "ROLLBACK" && kw != "END" {
 			if err := writeErrorResponse(conn, sqlstateInFailedTransaction,
@@ -265,6 +277,13 @@ func handleSimpleQuery(ctx context.Context, conn net.Conn, sess *engine.Session,
 				return txState, err
 			}
 			return txState, nil
+		}
+
+		if handled, err := handleSessionCommand(conn, params, kw, trimmed); handled {
+			if err != nil {
+				return txState, err
+			}
+			continue // SET/SHOW leave txState unchanged, like real PostgreSQL
 		}
 
 		ok, err := execOneStatement(ctx, conn, sess, stmt)

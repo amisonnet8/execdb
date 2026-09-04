@@ -274,10 +274,10 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
-- 現在のフェーズ: **④PostgreSQL互換ワイヤープロトコル開発、Step 2
-  （型マッピング）完了**。次はStep 3（`SET`/`SHOW`互換シム）から。詳細は
-  下記「フェーズ④のステップ」節・「フェーズ④Step 2（型マッピング）完了」
-  節を参照。
+- 現在のフェーズ: **④PostgreSQL互換ワイヤープロトコル開発、Step 3
+  （`SET`/`SHOW`互換シム）完了**。次はStep 4（`-u`/`--user`認証）から。
+  詳細は下記「フェーズ④のステップ」節・「フェーズ④Step 3（`SET`/`SHOW`
+  互換シム）完了」節を参照。
 - **フェーズ③Step 1（REPL基盤の再構築）完了（2026-09-04）。**
   - `cmd/execdb/access.go`: `splitStatements`から`scanStatements(sql) (complete []string,
     remainder string)`を切り出し（`splitStatements`はremainderが非空白なら末尾へ追加する
@@ -1136,6 +1136,46 @@ Step 1のスパイクで確定した方針（宣言型ベースのアフィニ�
   BOOLEAN列の実体（int64の0/1）が`t`として正しく表示されることを確認
 - `make check`・`make race`・`make test`（e2e、`tests/pgclient`実行含め
   全項目PASS）とも green を確認済み。依存追加なし
+
+## フェーズ④Step 3（`SET`/`SHOW`互換シム）完了（2026-09-04）
+
+`P4-2`（pgJDBCが接続直後に`SET extra_float_digits = 3`を送り、SQLiteが
+`SET`を解釈できず接続確立前に壊れる）への対応。
+
+- `cmd/execdb/pgsession.go`（新規）: `sessionParams`（`map[string]string`、
+  接続1本＝1goroutineで直列処理されるためロック不要）。
+  `handleSessionCommand(w, params, kw, stmt)`が`SET`/`SHOW`をSQLiteへ渡す
+  前に横取りする——`access.go`の`checkExternalAccess`が担う「拒否」/
+  「SQLiteへ渡す」の2区分とは別の、**ExecDB自身が応答する第3の区分**
+  として`pgwire.go`のディスパッチループ内で処理する設計とし、
+  `access.go`の分類器はSQLite向け文の判定という役割を保つ。
+  - `SET [SESSION|LOCAL] name (TO|=) value` → 値を`sessionParams`へ保存し
+    `CommandComplete("SET")`。SESSION/LOCALのスコープ区別はしない
+    （ExecDBにサブトランザクションのパラメータスタックが無いため）
+  - `SHOW name` → 1行1列で値を返す（未設定なら空文字列、NULLではない）。
+    **`SHOW ALL`は未実装**（実装するとしたらStep 7の実ドライバ確認で
+    必要と判明してから、というスコープを広げない判断——`ALL`という
+    トークン自体は識別子として正規表現にマッチしてしまうため、
+    明示的にエラーへ倒すガードを追加）
+  - `RESET`・`BEGIN ISOLATION LEVEL ...`等は今回未実装（Step 1(b)の
+    実機捕捉を省略したため、Step 7で実ドライバ確認してから要否判断）
+- `cmd/execdb/pgwire.go`: `sendStartupResponse`のパラメータ一覧を
+  `startupParameterStatus()`として切り出し、`sessionParams`の初期値
+  （`newSessionParams`）と共有——起動直後の`SHOW`が`ParameterStatus`で
+  既に伝えた値と一致するようにするため。`handleSimpleQuery`が
+  `sessionParams`を引き回し、文ごとのディスパッチループで
+  `handleSessionCommand`を`execOneStatement`より先に試す
+  （`txState == 'E'`中は`SET`/`SHOW`も他の文と同様25P02で拒否——
+  実PostgreSQL準拠）
+- 新規テスト`pgsession_test.go`（`SET`の各構文バリエーション・
+  クォートエスケープ・未知パラメータの`SHOW`・`SHOW ALL`拒否・
+  失敗構文のエラー応答）
+- **実機確認（`psql`）**: `SET`→`SHOW`が同一接続内で正しく往復すること、
+  別接続からは見えない（接続スコープの分離）こと、失敗トランザクション中の
+  `SET`が25P02で拒否されることを確認
+- `tests/e2e.sh`にpgwire TCP経由の`SET`/`SHOW`往復チェックを追加
+- `make check`・`make race`・`make test`（e2e）とも green を確認済み。
+  依存追加なし（`regexp`は標準ライブラリ）
 
 ## フェーズ④への申し送り
 

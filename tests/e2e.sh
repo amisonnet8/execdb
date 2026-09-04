@@ -263,6 +263,15 @@ echo "$bypass_out" | grep -q 'not allowed via external interface' \
   || fail "pgwire TCP: the DROP hidden after a SELECT was not rejected (got: $bypass_out)"
 pass "pgwire TCP: multi-statement DDL bypass rejected"
 
+# SET/SHOW are intercepted before reaching SQLite (phase 4 Step 3,
+# cmd/execdb/pgsession.go) -- SQLite has no SET/SHOW of its own and would
+# otherwise reject them as syntax errors, breaking drivers (pgJDBC) that
+# send a SET immediately on connect.
+setshow_out="$(psql -h 127.0.0.1 -p 15532 -U any -d any -tAc "SET extra_float_digits = 3; SHOW extra_float_digits;")"
+echo "$setshow_out" | tail -1 | grep -qx '3' \
+  || fail "pgwire TCP: SET/SHOW round trip returned $setshow_out, want a final line of 3"
+pass "pgwire TCP: SET/SHOW round trip within one connection"
+
 # --- tests/pgclient (pgx v5): a second, independent driver implementation ---
 # default_query_exec_mode=simple_protocol is required: pgx defaults to the
 # extended query protocol, which ExecDB does not implement in phase 1
