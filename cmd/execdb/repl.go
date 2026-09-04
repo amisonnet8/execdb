@@ -6,10 +6,8 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/amisonnet8/execdb/engine"
 )
@@ -39,6 +37,11 @@ type repl struct {
 	interactive bool
 	mode        outputMode // .mode (format.go); zero value behaves as modeList
 	headers     bool       // .headers
+
+	// interrupts is non-nil only for an interactive session (interrupt.go):
+	// SIGINT keeps its default (process-terminating) behavior for
+	// non-interactive/piped input, so it stays nil there.
+	interrupts *replInterrupts
 }
 
 // runREPL reads SQL statements and dot-commands from stdin until EOF,
@@ -70,6 +73,22 @@ func (r *repl) run() {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 
+	// The reader runs in its own goroutine so this loop is never blocked
+	// inside a stdin read: it can instead select between "a line
+	// arrived" and "an idle Ctrl+C arrived" (interrupt.go). Only an
+	// interactive session installs a SIGINT handler at all; idleSig
+	// stays nil otherwise, which disables that case of the select below
+	// (a nil channel blocks forever) and leaves SIGINT's default
+	// (process-terminating) behavior in place for piped input.
+	lr := startLineReader(scanner)
+	var idleSig chan struct{}
+	if r.interactive {
+		var stop func()
+		r.interrupts, stop = newReplInterrupts()
+		defer stop()
+		idleSig = r.interrupts.idleSig
+	}
+
 	var buf strings.Builder
 	for {
 		if r.interactive {
@@ -79,10 +98,30 @@ func (r *repl) run() {
 				fmt.Fprint(os.Stderr, "   ...> ")
 			}
 		}
-		if !scanner.Scan() {
-			break
+
+		var line string
+		select {
+		case l, ok := <-lr.lines:
+			if !ok {
+				if err := <-lr.err; err != nil {
+					fmt.Fprintln(os.Stderr, "Error:", err)
+				}
+				return
+			}
+			line = l
+			if r.interrupts != nil {
+				r.interrupts.resetOnNewLine()
+			}
+		case <-idleSig:
+			// First Ctrl+C while idle (interrupt.go): discard whatever
+			// multi-line statement was being typed and redraw the
+			// prompt, matching sqlite3's own behavior. A second,
+			// consecutive press instead exits the process directly
+			// from onInterrupt, without going through this loop at all.
+			buf.Reset()
+			continue
 		}
-		line := scanner.Text()
+
 		trimmed := strings.TrimSpace(line)
 
 		if buf.Len() == 0 && strings.HasPrefix(trimmed, ".") {
@@ -114,21 +153,30 @@ func (r *repl) run() {
 		}
 		buf.Reset()
 	}
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
-	}
 }
 
 // execSQL runs one statement, choosing Query over Exec for statements
 // that return rows (access.go's looksLikeRowReturning, shared with
-// pgwire's own dispatch).
+// pgwire's own dispatch). The statement's context is registered with
+// r.interrupts (when interactive) for the duration of the call, so a
+// Ctrl+C while it is running cancels it instead of terminating the
+// process (interrupt.go); TestSessionContextCancel (engine, phase 2)
+// already established that a Session stays usable after a canceled
+// query.
 func (r *repl) execSQL(stmt string) {
 	trimmed := strings.TrimSpace(stmt)
 	if trimmed == "" {
 		return
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if r.interrupts != nil {
+		defer r.interrupts.begin(cancel)()
+	}
+
 	if looksLikeRowReturning(trimmed) {
-		rows, err := r.sess.Query(stmt)
+		rows, err := r.sess.QueryContext(ctx, stmt)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 			return
@@ -137,7 +185,7 @@ func (r *repl) execSQL(stmt string) {
 		r.printRows(rows)
 		return
 	}
-	if _, err := r.sess.Exec(stmt); err != nil {
+	if _, err := r.sess.ExecContext(ctx, stmt); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 	}
 }
@@ -319,14 +367,8 @@ func (r *repl) cmdSnapshot(args []string) {
 			filename = a
 		}
 	}
-	if filename == "" {
-		filename = r.opts.snapshotAs
-	}
-	if filename == "" {
-		filename = defaultSnapshotBase()
-	}
 
-	path := snapshotFilename(filename, withTimestamp, time.Now(), runtime.GOOS)
+	path := resolveSnapshotFilename(r.opts, filename, withTimestamp)
 	if err := r.db.Snapshot(path); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		return

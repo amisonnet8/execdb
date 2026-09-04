@@ -452,6 +452,61 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
   - `make check`・`make race`・`make test`（e2e、全項目PASS）とも green
     を確認済み。実機確認（クォート・改行入りCSV、既存テーブル投入、
     フィールド数不一致時のロールバック）もすべて成功
+- **フェーズ③Step 6（`--snapshot-interval`とCtrl+C）完了（2026-09-04）。**
+  フェーズ③最大リスクのステップ（並行性・シグナル・contextキャンセルが絡む）。
+  - **`-i`/`--snapshot-interval`:** `options.snapshotInterval time.Duration`を
+    追加。`cmd/execdb/main.go`の`run()`が`opts.snapshotInterval > 0`のとき
+    バックグラウンドgoroutine（`runSnapshotInterval`）を起動、REPLモード・
+    サーバーモードどちらでも有効（`defer close(stop)`で`run()`終了時に停止）。
+    保存失敗（`engine.ErrBusy`等）はstderrへ出して次のtickへ進み、
+    プロセスを落とさない。`cmdSnapshot`（`.snapshot`）・
+    `autoSaveOnShutdown`（サーバーモード終了時）・`runSnapshotInterval`の
+    「ベース名決定→`snapshotFilename`→`db.Snapshot`」を`resolveSnapshotFilename`
+    ヘルパーに集約
+  - **Ctrl+C:** `cmd/execdb/interrupt.go`（新規）に`replInterrupts`
+    （sqlite3の`shell.c`と同じ状態機械——SIGINTのたびにカウンタを増やし、
+    新しい入力行を読むたびにリセット。カウンタが2を超えたら即
+    `os.Exit(1)`、1回目はクエリ実行中なら`cancel()`、アイドルなら
+    「入力破棄」を通知するだけで終了しない）と`lineReader`
+    （`bufio.Scanner`をバックグラウンドgoroutineで回し、メインループが
+    stdin読み取りでブロックされないようにする——pgwireの
+    `watchForDisconnect`と同型のパターン）を追加。**非対話（パイプ）時は
+    シグナルハンドラを一切登録しない**——`idleSig`が`nil`チャネルのままに
+    なることで`select`のその分岐が自然に無効化され、SIGINTの既定動作
+    （即終了）がそのまま保たれる
+  - `cmd/execdb/repl.go`: `run()`のメインループを`lr.lines`と
+    `idleSig`（アイドル時のみ有効）の`select`へ再構成。`execSQL`が
+    `context.WithCancel`＋`r.interrupts.begin(cancel)()`（deferで登録・
+    解除）でクエリ実行をキャンセル可能にし、`sess.Exec`/`Query`から
+    `sess.ExecContext`/`QueryContext`へ切り替え
+  - 新規テスト`interrupt_test.go`（7件、全PASS）: 状態機械を
+    `os.Exit`を実際には呼ばない`exitFunc`差し替えで直接テスト
+    （アイドル1回目は継続・連続2回目で終了・`resetOnNewLine`後は
+    フレッシュな1回目扱い・クエリ実行中はcancel優先・実行中でも連続
+    2回目は強制終了・`end()`後はcancel解除）、`lineReader`の基本動作
+  - e2eに2件追加: `--snapshot-interval`（サーバーモードで`snap1`を再利用、
+    定期保存ログと保存内容を確認）、**`script`（util-linux）によるPTY確保
+    Ctrl+Cテスト**（`command -v script`が無ければskip）——長いクエリ実行中の
+    Ctrl+Cでキャンセルされセッションが使え続けること、アイドル時の
+    1回目Ctrl+Cでは終了しないこと、連続2回目で終了コード1になることを
+    実機確認
+  - **e2e実装中に踏んだ`set -e`の落とし穴（新知見）:** パイプの右側を
+    `{ timeout ... script ...; echo $? >file; }`という別ブロックで囲み
+    終了コードをファイル経由で受け取る設計にしたが、**パイプの各段は
+    別のサブシェル（フォークされた子プロセス）で実行され、`set -e`
+    （errexit）はそのサブシェルにも継承される。** そのため、
+    期待どおりの非ゼロ終了（今回は連続Ctrl+Cによる`exit 1`）自体が
+    `echo $?`に到達する前にサブシェルを中断させ、ファイルへの書き込みが
+    行われないまま外側のスクリプトが（EXITトラップ経由で）静かに
+    終了してしまう、という分かりにくい失敗を引き起こした。**対処:
+    そのサブシェルの先頭で`set +e`し、危険なコマンドの終了コードを
+    errexitの対象から外してから`$?`を読む。** `.claude/rules/testing.md`
+    へ追記
+  - `make check`・`make race`・`make test`（e2e、3回連続実行でflakinessなし）
+    とも green を確認済み。加えて`CGO_ENABLED=1 go build -race`した実バイナリ
+    に対して実際のCtrl+C操作・`-i`＋SIGTERM操作を行い、データレースが
+    無いことを確認済み（interrupt.go・lineReaderの並行設計が単体テストの
+    枠を超えて実機でも安全であることの裏付け）
 - 下準備として以下を作成済み（2026-09-03時点）:
   - `go.mod`（module: `github.com/amisonnet8/execdb`）
   - `LICENSE`（MIT, copyright: amisonnet8）

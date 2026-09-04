@@ -22,17 +22,17 @@ import (
 // version is set at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
-// options holds the parsed startup flags (spec §9). -u/--user and
-// -i/--snapshot-interval are deferred to later phases (they need
-// golang.org/x/term and a ticker respectively) and are intentionally not
-// defined here or shown in --help.
+// options holds the parsed startup flags (spec §9). -u/--user is
+// deferred to phase 4 (it needs golang.org/x/term for masked password
+// input) and is intentionally not defined here or shown in --help.
 type options struct {
-	pgAddr     string
-	socket     string
-	snapshotAs string
-	noRepl     bool
-	quiet      bool
-	timestamp  bool
+	pgAddr           string
+	socket           string
+	snapshotAs       string
+	noRepl           bool
+	quiet            bool
+	timestamp        bool
+	snapshotInterval time.Duration
 }
 
 func parseFlags(args []string) (*options, error) {
@@ -51,6 +51,8 @@ func parseFlags(args []string) (*options, error) {
 	fs.BoolVar(&opts.quiet, "q", false, "")
 	fs.BoolVar(&opts.timestamp, "timestamp", false, "")
 	fs.BoolVar(&opts.timestamp, "t", false, "")
+	fs.DurationVar(&opts.snapshotInterval, "snapshot-interval", 0, "")
+	fs.DurationVar(&opts.snapshotInterval, "i", 0, "")
 
 	fs.Usage = printUsage
 	if err := fs.Parse(args); err != nil {
@@ -71,6 +73,8 @@ Options:
   -n, --no-repl           Run in server mode without starting the REPL
   -q, --quiet             Suppress the startup banner
   -t, --timestamp         Append a timestamp to saved filenames
+  -i, --snapshot-interval DURATION
+                          Periodically save a snapshot at this interval (e.g. 5m)
   -h, --help              Show this message
 `, version)
 }
@@ -100,6 +104,12 @@ func run(opts *options) {
 		os.Exit(1)
 	}
 	defer stopPgwire()
+
+	if opts.snapshotInterval > 0 {
+		stop := make(chan struct{})
+		defer close(stop)
+		go runSnapshotInterval(db, opts, stop)
+	}
 
 	printBanner(db, opts)
 
@@ -148,16 +158,38 @@ func runServerMode(db *engine.DB, opts *options) {
 }
 
 func autoSaveOnShutdown(db *engine.DB, opts *options) {
-	base := opts.snapshotAs
-	if base == "" {
-		base = defaultSnapshotBase()
-	}
-	path := snapshotFilename(base, opts.timestamp, time.Now(), runtime.GOOS)
+	path := resolveSnapshotFilename(opts, "", opts.timestamp)
 	if err := db.Snapshot(path); err != nil {
 		fmt.Fprintln(os.Stderr, "Error saving snapshot:", err)
 		os.Exit(1)
 	}
 	fmt.Fprintf(os.Stderr, "Saved snapshot to %s\n", path)
+}
+
+// runSnapshotInterval saves a snapshot every opts.snapshotInterval, in
+// both REPL and server mode (spec §9: "REPLモード・サーバーモード
+// いずれでも有効"), until stop is closed. A save failure (most notably
+// engine.ErrBusy, a legitimate outcome of racing a concurrent writer --
+// .claude/rules/sqlite-quirks.md, PLAN.md's phase 2 Step 6 note) is
+// reported to stderr and just waits for the next tick, rather than
+// treated as fatal: unlike server-mode's shutdown save, there will be
+// another chance shortly.
+func runSnapshotInterval(db *engine.DB, opts *options, stop <-chan struct{}) {
+	ticker := time.NewTicker(opts.snapshotInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			path := resolveSnapshotFilename(opts, "", opts.timestamp)
+			if err := db.Snapshot(path); err != nil {
+				fmt.Fprintln(os.Stderr, "Error saving periodic snapshot:", err)
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "Saved periodic snapshot to %s\n", path)
+		}
+	}
 }
 
 // defaultSnapshotBase is the base filename used when neither
@@ -169,4 +201,22 @@ func defaultSnapshotBase() string {
 		return "execdb"
 	}
 	return filepath.Base(self)
+}
+
+// resolveSnapshotFilename applies naming.md's single file-naming rule
+// (snapshotFilename) using the base-name precedence spec §9 defines: an
+// explicit filename (e.g. a ".snapshot NAME" argument, or "" if none),
+// else --snapshot-as, else the running binary's own name. Shared by
+// .snapshot, server-mode's auto-save-on-shutdown, and
+// --snapshot-interval's periodic saves, so this precedence and the
+// naming rule itself exist in exactly one place.
+func resolveSnapshotFilename(opts *options, explicit string, withTimestamp bool) string {
+	base := explicit
+	if base == "" {
+		base = opts.snapshotAs
+	}
+	if base == "" {
+		base = defaultSnapshotBase()
+	}
+	return snapshotFilename(base, withTimestamp, time.Now(), runtime.GOOS)
 }

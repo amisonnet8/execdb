@@ -145,6 +145,84 @@ echo "$out" | grep -qx '1|hello' || fail ".import row 1 did not come through cor
 echo "$out" | grep -qx '2|quoted, value' || fail ".import did not preserve a quoted comma-containing field (got: $out)"
 pass ".import: CSV data loads into a newly created table"
 
+# --- --snapshot-interval periodically saves in the background (spec
+# §9/§10). Runs $WORK/snap1 (table t, row 7, seeded earlier by the
+# .snapshot check) in server mode (-n) so no REPL stdin needs to be fed
+# to a backgrounded process -- server mode just needs to sit and let the
+# ticker fire a few times before being stopped. ---
+LOG="$WORK/interval.log"
+(cd "$WORK" && exec "$WORK/snap1" -n -i 300ms -o "$WORK/interval-snap") >"$LOG" 2>&1 &
+ipid=$!
+SERVER_PIDS+=("$ipid")
+sleep 1
+kill "$ipid" >/dev/null 2>&1 || true
+tries=100
+while kill -0 "$ipid" 2>/dev/null; do
+  tries=$((tries - 1))
+  [ "$tries" -gt 0 ] || break
+  sleep 0.1
+done
+
+grep -q 'Saved periodic snapshot to' "$LOG" || fail "--snapshot-interval did not save at least one periodic snapshot (log: $(cat "$LOG"))"
+[ -f "$WORK/interval-snap" ] || fail "--snapshot-interval did not produce a snapshot file"
+chmod +x "$WORK/interval-snap"
+out="$(printf 'SELECT * FROM t;\n.exit\n' | "$WORK/interval-snap")"
+echo "$out" | grep -qx '7' || fail "the periodic snapshot did not contain the seeded row"
+pass "--snapshot-interval: periodic background saves work in server mode"
+
+# --- Ctrl+C (SIGINT): sqlite3-style interrupt state machine
+# (spec §9/§10, interrupt.go). A real PTY is required, since a plain
+# pipe never generates a genuine SIGINT the way a terminal's line
+# discipline does for its INTR character (0x03) -- this check is skipped
+# if `script` (util-linux) isn't available. ---
+if command -v script >/dev/null 2>&1; then
+  cp "$BIN" "$WORK/interrupt"
+  RAW="$WORK/interrupt.raw"
+  OUT="$WORK/interrupt.out"
+  : >"$RAW"
+  {
+    printf 'CREATE TABLE t(a);\n'
+    printf 'INSERT INTO t VALUES (1);\n'
+    printf 'WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 50000000) SELECT count(*) FROM cnt;\n'
+    sleep 1
+    printf '\x03'          # Ctrl+C while a long query runs: cancel it, don't exit
+    sleep 0.5
+    printf 'SELECT 42;\n'  # the session must still work afterward
+    sleep 0.3
+    printf '\x03'          # Ctrl+C while idle (1st, consecutive count=1): discard input, don't exit
+    sleep 0.3
+    printf 'SELECT 2;\n'   # proves the process is still alive
+    sleep 0.3
+    printf '\x03'          # Ctrl+C while idle (2nd consecutive, no line read in between): force-quit
+    sleep 0.1
+    printf '\x03'
+    sleep 0.5
+  } | { set +e; timeout 10 script -qec "$WORK/interrupt -q" "$RAW" >/dev/null 2>&1; echo $? >"$WORK/interrupt.status"; }
+  # execdb's own exit code (1 is expected: the two consecutive idle
+  # Ctrl+C presses force-quit) is captured to a file by the right-hand
+  # side of the pipe above, rather than read from "$?"/PIPESTATUS right
+  # after the pipeline. Two `set -e`-related pitfalls made that
+  # necessary: (1) a plain pipeline statement whose last stage exits
+  # non-zero aborts the whole script outright under `set -e`, and
+  # PIPESTATUS combined with `set -u` was separately observed (bash
+  # 5.2.15) to report "unbound variable" for an index that clearly
+  # exists; (2) each side of a pipe runs in its own forked subshell that
+  # *inherits* `set -e`, so without "set +e" here, execdb's expected
+  # exit code of 1 would abort this subshell before it ever reached the
+  # "echo $? >file" line -- silently, since the outer script's EXIT trap
+  # then fires and cleans up before any of this is visible.
+  status="$(cat "$WORK/interrupt.status")"
+  tr -d '\r' <"$RAW" >"$OUT"
+
+  grep -q 'context canceled' "$OUT" || fail "Ctrl+C during a long query did not cancel it (got: $(cat "$OUT"))"
+  grep -qx '42' "$OUT" || fail "the session did not survive a canceled query (got: $(cat "$OUT"))"
+  grep -qx '2' "$OUT" || fail "a single idle Ctrl+C should not have exited the REPL (got: $(cat "$OUT"))"
+  [ "$status" -eq 1 ] || fail "two consecutive idle Ctrl+C presses should force-quit with exit code 1 (got $status)"
+  pass "REPL: Ctrl+C cancels a running query, and two consecutive idle presses force-quit"
+else
+  echo "skip - REPL Ctrl+C check ('script' not found)"
+fi
+
 # --- .overwrite persists into the running executable (spec §4, §7) ---
 cp "$BIN" "$WORK/ow"
 before_size=$(wc -c <"$WORK/ow")
