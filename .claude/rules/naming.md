@@ -10,9 +10,16 @@ ExecDB では、REPLコマンド・CLI起動オプション・`engine`パッケ�
 
 | REPLコマンド | CLI起動オプション | `engine` API |
 | :--- | :--- | :--- |
-| `.snapshot` | `--snapshot-as` | `db.Snapshot()` |
+| `.snapshot` | `--snapshot-as` | `db.Snapshot(path string)` |
 | `.overwrite` | ─（自身のパスに固定） | `db.Overwrite()` |
-| `.load` | ─（REPL専用、CLI起動オプションなし） | `db.Load()` |
+| `.load` | ─（REPL専用、CLI起動オプションなし） | `db.Load(path string)` |
+| ─（起動時に暗黙実行） | ─ | `engine.OpenSelf()` |
+| ─（ライブラリ専用、REPL/CLIの対応なし） | ─ | `engine.Open(path string)` / `engine.New()` |
+
+`engine.OpenSelf()` / `engine.Open()` / `engine.New()` はDBの生成・ロード方法
+であり、ユーザー操作に対応するコマンドではないため、REPLコマンド・CLI起動
+オプションの列が空欄になるのは意図通り（3レイヤー対応の原則が崩れている
+わけではない）。
 
 新規追加時も、この3レイヤーの名前が対応するように設計すること。対応関係が
 崩れる変更をする場合は、必ず3箇所（REPL・CLI・`engine`）を同時に確認・修正する。

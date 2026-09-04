@@ -95,9 +95,40 @@ GitHub Actions 3OSマトリクスがgreen（Windowsでの`.overwrite`含む）�
   仕様書が懸念していた「復元専用DBになる」リスクは**該当しない**。
 - 接続共有: `file:execdb?mode=memory&cache=shared` + keeper接続（Close()まで
   保持する`*sql.Conn`）で、複数の独立した`*sql.Conn`が同一インメモリDBを
-  共有できることを確認。
+  共有できることを確認（**ただしこれは通常のSQL文について。Deserializeには
+  適用されない点をStep 2で追加発見、下記参照**）。
 - ラウンドトリップ: TABLE/INDEX/VIEW/TRIGGER/AUTOINCREMENT/BLOBすべて
   Serialize→Deserializeで保持されることを確認。
+
+## Step 2 で確定した事実（重要な追加発見、2026-09-04）
+
+**`Deserialize`は呼び出したコネクション自身にしか反映されない。** 共有キャッシュ
+DSN（`file:execdb?mode=memory&cache=shared`）を使っていても、`Deserialize`実行
+「後」に新規に開いた別コネクションですら、その内容を見ることができない
+（`engine/serialize_test.go` の `TestDeserializeDoesNotPropagateToOtherConnections`
+で実測・固定化済み）。これはStep 1のスパイクでは検証していなかった組み合わせ
+（Step 1は「共有キャッシュ＋通常SQL」と「Deserialize＋単一コネクション」を
+別々にしか検証しておらず、「共有キャッシュ＋Deserialize」の組み合わせは
+未検証だった）。
+
+- **engine側の対処:** `DB.Exec`/`Query`/`QueryRow` は全て `db.sdb`（コネクション
+  プール）ではなく `db.keeper`（`Open`/`OpenSelf`/`Load`が`Deserialize`を実行した
+  のと同じ単一の`*sql.Conn`）経由に統一した。`Load`も新しいDBを丸ごと作り直す
+  （新しい`*sql.DB`+`*sql.Conn`を用意し、その新しいコネクション上で
+  `Deserialize`してから`db.keeper`を差し替える）ことで一貫性を保っている。
+- **フェーズ③/④への影響（要検討事項として申し送り）:** 仕様書§2/§8が要求する
+  「REPLと外部I/Fが2つの独立したクライアントとして同一DBを操作する」を
+  `cmd/execdb`で実現する際、**両方が素朴に別々の`*sql.Conn`を持つ設計のままだと、
+  起動時`OpenSelf()`や`.load`で取り込んだデータをpgwire側のセッションが見えない
+  事故が起きうる。** 対策候補（フェーズ③/④着手時に判断）:
+  1. `cmd/execdb`側もすべてのSQL実行を`engine.DB`の`Exec`/`Query`経由に統一し、
+     生の`*sql.Conn`を個別に取り回さない（トランザクション状態はアプリ層で
+     管理する）。
+  2. `engine`側に、追加コネクションが必要になった場合の安全な取得方法
+     （例: SQLiteのBackup/Restore API経由でkeeperの内容を新規コネクションへ
+     コピーする、等）を新設する。
+  現時点（フェーズ①）では1の方針（`engine.DB`のAPI経由に統一）で問題なく、
+  2は将来的に真の並行アクセス性能が必要になった場合の拡張候補として保留する。
 
 ## 現在地
 
@@ -105,7 +136,8 @@ GitHub Actions 3OSマトリクスがgreen（Windowsでの`.overwrite`含む）�
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
-- 現在のフェーズ: ①ミニマム実装 — **Step 1完了**、Step 2（`engine`パッケージ）着手前
+- 現在のフェーズ: ①ミニマム実装 — **Step 2完了**、Step 3（`cmd/execdb` CLI・
+  バナー・REPL）着手前
 - 下準備として以下を作成済み（2026-09-03時点）:
   - `go.mod`（module: `github.com/amisonnet8/execdb`）
   - `LICENSE`（MIT, copyright: amisonnet8）
@@ -126,9 +158,29 @@ GitHub Actions 3OSマトリクスがgreen（Windowsでの`.overwrite`含む）�
     `.go`/`go.mod`/`go.sum`編集時のみ`make build`を実行（jqでfile_pathを
     判定）、それ以外はスキップ。実際にEditで発火することを確認済み
   - `engine/doc.go`・`cmd/execdb/main.go` はまだ骨格のみ（ロジック未実装）
-- 次のアクション: Step 2（`engine`パッケージ本体 — フッターI/O、`DB`型の
-  SQL実行API、`Snapshot`/`SnapshotTo`/`Overwrite`/`Load`/`OpenSelf`）に着手する。
-  仕様書§7・§6・naming.mdへの確定事項反映もStep 2で行う。
+- Step 2で以下を実施済み（2026-09-04時点）:
+  - `engine/footer.go`（`Magic`/`FooterSize`/`FormatVersion`定数、`Info`型、
+    `Inspect(path)`、フッターのエンコード/デコード。整数はbig-endian）
+  - `engine/serialize.go`（`serialize()`/`deserializeInto()`。Step1で確定した
+    実シグネチャに基づく実装）
+  - `engine/engine.go`（`DB`型、`New`/`Open`/`OpenSelf`、`Exec`/`Query`/
+    `QueryRow`/`Info`/`Close`。**`Exec`/`Query`/`QueryRow`は`db.keeper`
+    経由に統一**——理由は下記「Step 2で確定した事実」参照）
+  - `engine/persist.go`（`Snapshot`/`SnapshotTo`/`Overwrite`/`Load`。
+    削除済みPoCの退避rename方式・`.execdb_old`掃除ロジックを移植し、
+    tmp+renameによるアトミック書き込み、`go run`一時バイナリに対する
+    `Overwrite`の明示エラー化を追加）
+  - テスト一式（`footer_test.go`/`engine_test.go`/`serialize_test.go`/
+    `persist_test.go`）を作成、全PASS。`persist_test.go`の
+    `TestOverwriteEndToEnd`は`engine/testdata/overwritehelper`を実際に
+    `go build`し、2回実行（seed→read）することで`.overwrite`の実機相当の
+    動作確認まで実施済み
+  - `make check`・`make build`（`cmd/execdb`込み）・`net`直接依存なしを確認済み
+  - 仕様書§6（`Snapshot(path)`確定、`OpenSelf()`追加）・§4（`.load`のバージョン
+    警告は呼び出し側責務）・naming.md（対応表更新）へ反映済み
+- 次のアクション: Step 3（`cmd/execdb` — CLI起動オプション、起動時バナー、
+  REPL、ドットコマンド）に着手する。特に`.overwrite`のREPL経由での実機確認を
+  優先する。
 
 ## 保留事項
 
