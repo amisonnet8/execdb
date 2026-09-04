@@ -19,11 +19,25 @@ ExecDB では、REPLコマンド・CLI起動オプション・`engine`パッケ�
 | ─（ライブラリ専用、`.load`のio.Reader版） | ─ | `db.LoadFrom(r io.Reader)` |
 | ─（ライブラリ専用。REPLの内部実装（`completeStatements`）が入力が完結したか判定するのに使う） | ─ | `engine.Complete(sql string) (bool, error)` |
 | ─（ライブラリ専用。`.import`のCSV一括投入が同じ文を繰り返し実行するのに使う） | ─ | `s.Prepare(query string)` / `s.PrepareContext(ctx, query string)` |
+| `.mode` | ─ | ─ |
+| `.headers` | ─ | ─ |
+| `.dump` | ─ | ─ |
+| `.import` | ─ | ─ |
+| ─（自動実行、対応するREPLコマンドなし） | `-i` / `--snapshot-interval` | `db.Snapshot(path string)`（`.snapshot`と共用） |
 
 `engine.OpenSelf()` / `engine.Open()` / `engine.New()` / `db.Session()` /
 `db.LoadFrom()` はDBの生成・ロード・接続取得方法であり、ユーザー操作に直接
 対応するコマンドではないため、REPLコマンド・CLI起動オプションの列が空欄に
 なるのは意図通り（3レイヤー対応の原則が崩れているわけではない）。
+
+`.mode`/`.headers`/`.dump`/`.import`はいずれもCLI起動オプション・`engine` API
+の対応を持たない、`cmd/execdb`内で完結する REPL 専用コマンドである
+（フェーズ③のスコープ判断: スキーマ内省・出力整形・CSV変換のロジックを
+`engine`側のAPIとして切り出さない、という確定方針。`.import`が使う
+`s.Prepare`/`s.PrepareContext`のみが例外的に`engine`への追加になった）。
+`-i`/`--snapshot-interval`は対応するREPLコマンドを持たない代わりに、
+`.snapshot`と同じ`db.Snapshot(path string)`を定期的に呼ぶだけであり、
+専用の`engine` APIを新設していない。
 
 新規追加時も、この3レイヤーの名前が対応するように設計すること。対応関係が
 崩れる変更をする場合は、必ず3箇所（REPL・CLI・`engine`）を同時に確認・修正する。

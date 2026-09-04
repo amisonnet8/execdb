@@ -274,8 +274,9 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
-- 現在のフェーズ: **②`engine`ライブラリ開発完了**。フェーズ③（REPL開発）の
-  計画立案・承認済み（2026-09-04）。詳細は下記「フェーズ③のステップ」節を参照。
+- 現在のフェーズ: **③REPL開発完了**。次はフェーズ④（PostgreSQL互換ワイヤー
+  プロトコル開発）の計画立案から。詳細は下記「フェーズ③のステップ」節・
+  「フェーズ④への申し送り」節を参照。
 - **フェーズ③Step 1（REPL基盤の再構築）完了（2026-09-04）。**
   - `cmd/execdb/access.go`: `splitStatements`から`scanStatements(sql) (complete []string,
     remainder string)`を切り出し（`splitStatements`はremainderが非空白なら末尾へ追加する
@@ -507,6 +508,39 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
     に対して実際のCtrl+C操作・`-i`＋SIGTERM操作を行い、データレースが
     無いことを確認済み（interrupt.go・lineReaderの並行設計が単体テストの
     枠を超えて実機でも安全であることの裏付け）
+- **フェーズ③Step 7（仕様書・ルール・PLANへの反映）完了（2026-09-04）。**
+  - `execdb_spec.md`: §10の`[4. 停止（REPLモード）]`を全面書き換え——
+    Ctrl+Cが対話端末では終了ではなく中断コマンドであること（クエリ実行中は
+    そのクエリだけ中断／アイドル時1回目は入力破棄のみ／連続2回目で終了
+    コード1）、非対話時は既定動作のまま即終了すること、`.exit`/`.quit`/
+    EOF（Ctrl+D）が通常の終了手段であることを明記。§4の「プロセス停止時の
+    自動保存は行わない」の記述も、Ctrl+Cが常に即終了するわけではない旨の
+    §10参照を添えて更新。§3（`.mode`5種・`.import`/`.dump`の意図的な相違・
+    `.exit [CODE]`）・§6（`Session.Prepare`/`PrepareContext`）は
+    Step 5で先行反映済みのため変更なし。§9（`-i`の表・定期スナップショット
+    節）はすでに実装と一致していたため変更なし
+  - `.claude/rules/cli-output.md`: 「出力モード」節を新設（`.mode`5種の
+    採用理由と装飾系不採用の根拠、各モードの詳細、BLOBの型判別方法）。
+    「SIGINTハンドラの登録可否」節を新設（対話時のみ登録する理由——
+    非対話実行時にCtrl+Cで止められなくなる事故を防ぐため）
+  - `.claude/rules/naming.md`: 対応表に`.mode`/`.headers`/`.dump`/`.import`
+    （いずれもCLI起動オプション・`engine` APIの対応を持たないREPL専用
+    コマンド）と`-i`/`--snapshot-interval`（`db.Snapshot`を`.snapshot`と
+    共用）の行を追加。スキーマ内省APIを`engine`へ切り出さないという
+    フェーズ③の確定方針も明記
+  - `PLAN.md`:「フェーズ③・④への申し送り」を「フェーズ④への申し送り」へ
+    整理——フェーズ③で片付いた項目（`.dump`/`.import`/`.mode`/`.headers`/
+    `-i`/Ctrl+C）を除き、スキーマ内省APIは「不採用」と確定したことを明記。
+    残るのは型マッピング・`--user`認証・`CancelRequest`・Extended Query
+    （すべてフェーズ④スコープ、変更なし）
+  - `make check`・`make race`・`make test`とも green を確認済み（ドキュメント
+    のみの変更のため回帰リスクは無いが、念のため実行）
+- **フェーズ③（REPL開発）完了。** 全7ステップ（REPL基盤の再構築→出力
+  フォーマット→`.dump`→`sqlite3_complete`統合→`.import`→
+  `--snapshot-interval`とCtrl+C→ドキュメント反映）を完了し、REPLは
+  仕様書§3が宣言するコマンド体系をすべて実装した、sqlite3 CLIに準じる
+  実用的な対話環境になった。次のアクションはフェーズ④
+  （PostgreSQL互換ワイヤープロトコル開発）の計画立案。
 - 下準備として以下を作成済み（2026-09-03時点）:
   - `go.mod`（module: `github.com/amisonnet8/execdb`）
   - `LICENSE`（MIT, copyright: amisonnet8）
@@ -908,26 +942,16 @@ REPL開発フェーズは、以下のステップで進める（2026-09-04、計
 計画の全文は `/home/vscode/.claude/plans/step-step-step-crispy-graham.md` を参照
 （セッションログにも詳細が残る）。
 
-## フェーズ③・④への申し送り
+## フェーズ④への申し送り
 
-フェーズ②の設計・実装過程で判明した、意図的にスコープ外とした事項。
-`engine`側の土台（`Session`・`*Context`・backup経由の`Load`等）は用意済みで、
-以下は`cmd/execdb`側の機能追加として次フェーズで着手する。
-
-**フェーズ③（REPL開発）:**
-- `.dump`/`.import`/`.mode`/`.headers` — `.dump`にはBLOBをSQLリテラル化する
-  ための型区別、`.import`には一括投入用のトランザクション制御が要る
-  （`engine.Session`で対応可能）
-- スキーマ内省API（`Tables()`/`Schema()`/`TableInfo()`相当）— 現状`.tables`/
-  `.schema`は`cmd/execdb/repl.go`が`sqlite_master`への生SQLで実装している。
-  `.dump`/`.import`の要件が固まってから、`engine`側API化するか判断する
-- `--snapshot-interval`（`-i`）— バックグラウンドゴルーチンからの定期
-  `Snapshot`。`serializeBarrier`（Step 2）が並行書き込みに対して安全なことは
-  既に検証済み（`TestSnapshotDuringConcurrentWritesProducesConsistentImage`）
-  なので、追加のengine変更は不要なはず
-- REPLでのCtrl+C（実行中クエリの中断）— サーバーモードのSIGTERM自動保存との
-  兼ね合い、「クエリ実行中でない時のCtrl+Cはどうするか」（sqlite3 CLI相当の
-  挙動）を含めてREPLコマンド体系の設計判断が必要
+フェーズ②・③の設計・実装過程で判明した、意図的にスコープ外とした事項。
+フェーズ③（REPL開発）は全7ステップを完了し、`.mode`/`.headers`/`.dump`/
+`.import`/`--snapshot-interval`/Ctrl+Cはすべて実装済み。スキーマ内省API
+（`Tables()`/`Schema()`相当）の`engine`側切り出しは、フェーズ③のスコープ
+判断で明示的に**不採用**と確定した（`.tables`/`.schema`/`.dump`/`.import`は
+今後も`cmd/execdb`側の生SQL実装のまま——`.claude/rules/naming.md`参照）。
+残るのは以下、いずれもフェーズ④（PostgreSQL互換ワイヤープロトコル開発）の
+スコープ。
 
 **フェーズ④（PostgreSQL互換ワイヤープロトコル開発）:**
 - 型マッピング（Postgres OID対応表）— 現状全列OID 25(text)固定。
