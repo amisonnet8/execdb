@@ -9,12 +9,32 @@ Npgsql/pgx等）がそのまま接続できることを狙っている。
 | 実装する | 実装しない（初期スコープ外） |
 | :--- | :--- |
 | 認証ハンドシェイク（デフォルト`trust`相当、`--user`指定時のみcleartext password） | SCRAM/MD5等の認証方式 |
-| Simple Query プロトコル（`Query`メッセージ） | Extended Query プロトコル（`Parse`/`Bind`/`Execute`） |
-| `RowDescription`/`DataRow`/`CommandComplete` | `COPY`系プロトコル、LISTEN/NOTIFY |
+| Simple Query プロトコル（`Query`メッセージ） | `COPY`系プロトコル、LISTEN/NOTIFY |
+| Extended Query プロトコル（`Parse`/`Bind`/`Describe`/`Execute`/`Sync`/`Close`/`Flush`） | バイナリ形式のパラメータ（Bindの値側。テキストのみ） |
+| 結果値のバイナリ形式（`int8`/`float8`/`bool`/`bytea`/`timestamp`の5型のみ。下記参照） | NUMERICのバイナリ形式（base-10000桁グループの複雑な符号化。実装しない——後述） |
+| `RowDescription`/`DataRow`/`CommandComplete` | 行数制限付き実行・`PortalSuspended`（`Execute`のmaxRowsは無視） |
 | エラー応答（`ErrorResponse`） | 詳細なSQLSTATEコード体系（簡略化したコードで代用） |
 
-このスコープを勝手に広げない（例えば Extended Query プロトコルへの対応を
-先回りして実装しない）。範囲を広げる場合は、まず仕様書を更新してから着手する。
+このスコープを勝手に広げない。範囲を広げる場合は、まず仕様書を更新してから
+着手する（**フェーズ④Step 5でExtended Queryを採用に切り替えた実例**:
+`pgx`/pgJDBC/Npgsqlがデフォルト設定でSimple Queryのみでは接続できない
+——`execdb_spec.md`§8参照——ことが判明したため、着手前に仕様書§8の表を
+更新してからStep 5に着手した）。
+
+**結果値のバイナリ形式が必要になった経緯（フェーズ④Step 5、実機確認で判明）:**
+テキスト形式のみで実装したところ、`pgx`のデフォルト（Extended Query）接続で
+`int8`/`float8`/`numeric`/`bool`/`bytea`/`timestamp`列が軒並み失敗した
+（`invalid length for int8: 1`等のエラー、`bool`/`bytea`は**エラーにならず
+黙って誤った値**を返す方が危険だった）。原因は`pgx`が`Bind`メッセージの
+`resultFormatCodes`で、これらの型に対しデフォルトでバイナリ形式を要求して
+くるため。`ParameterDescription`同様に「決め打ちで実装せず実機で確認する」
+方針どおり、実際に`pgx`を繋いで初めて判明した。NUMERICだけは対象外とした
+——SQLiteのNUMERIC親和性は内部的に必ずINTEGERかREALのいずれかで格納され
+（真の任意精度十進数を持たない）、Postgresの複雑なバイナリNUMERIC形式を
+実装する代わりに、`columnOID`がNUMERIC親和性の宣言型を実行時のGo動的型
+（int64/float64）で`int8`/`float8`へ振り分けることで、`pgx`がそもそも
+NUMERIC OIDに対してバイナリを要求する状況自体を発生させない設計にした
+（詳細は`cmd/execdb/pgtype.go`の`columnOID`/`affinityOID`のdocコメント参照）。
 
 ## 型マッピング
 

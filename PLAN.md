@@ -274,12 +274,12 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
-- 現在のフェーズ: **④PostgreSQL互換ワイヤープロトコル開発、Step 4
-  （`-u`/`--user`認証）完了**。次はStep 5（Extended Queryプロトコル、
-  最大リスクのステップ）から——**着手前に仕様書§8の採用範囲表を
-  先行更新すること**（`.claude/rules/pgwire.md`のスコープ拡大時の
-  ルール）。詳細は下記「フェーズ④のステップ」節・「フェーズ④Step 4
-  （`-u`/`--user`認証）完了」節を参照。
+- 現在のフェーズ: **④PostgreSQL互換ワイヤープロトコル開発、Step 5
+  （Extended Queryプロトコル）完了**。次はStep 6（`CancelRequest`/
+  `BackendKeyData`）から。詳細は下記「フェーズ④のステップ」節・
+  「フェーズ④Step 5（Extended Queryプロトコル）完了」節を参照
+  （実機確認で判明した「pgxがint8/float8/bool/bytea/timestampに
+  デフォルトでバイナリ結果形式を要求する」という重要な追加事実を含む）。
 - **フェーズ③Step 1（REPL基盤の再構築）完了（2026-09-04）。**
   - `cmd/execdb/access.go`: `splitStatements`から`scanStatements(sql) (complete []string,
     remainder string)`を切り出し（`splitStatements`はremainderが非空白なら末尾へ追加する
@@ -1228,6 +1228,129 @@ Step 1のスパイクで確定した方針（宣言型ベースのアフィニ�
   （正しい認証情報での接続・誤ったパスワードの拒否・
   `StartupMessage`の`user`不一致の拒否）を追加
 - `make check`・`make race`・`make test`（e2e）とも green を確認済み
+
+## フェーズ④Step 5（Extended Queryプロトコル）完了（2026-09-04）
+
+フェーズ④最大リスクのステップ。着手前に仕様書§8・`.claude/rules/pgwire.md`の
+採用範囲表をExtended Query採用へ先行更新（`.claude/rules/pgwire.md`の
+「スコープを広げる場合はまず仕様書を更新」ルールに従う）。
+
+- `cmd/execdb/pgextended.go`（新規）: `Parse`/`Bind`/`Describe`/`Execute`/
+  `Close`の各ハンドラ。`preparedStatement`（`sql`/`stmt *sql.Stmt`/
+  `numParams`/`rowReturning`）と`portal`（`stmtName`/`args`/
+  `resultFormats`）を接続ごとの`extendedQueryConn`（`statements`/
+  `portals`のmap、`inError`フラグ）で管理。`""`（無名文/無名ポータル）は
+  常に上書き可能、名前付きは既存があればエラー——実PostgreSQL準拠。
+  `countPlaceholders`（クォート・コメントを考慮した`$N`最大値スキャン、
+  `access.go`の`hasReturningClause`と同じ骨格）でBind/Describeが要求する
+  パラメータ数を決定
+- **プレースホルダはStep 1(c)-1の実測どおり無変換でSQLiteへそのまま渡せた**
+  （書き換え層は作らなかった）
+- **`Describe`はStep 1(c)-2の設計どおり実装**: 行を返す文は全プレースホルダに
+  NULLを仮バインドした試験実行（`SAVEPOINT execdb_describe`→
+  `ROLLBACK TO`→`RELEASE`で囲む）から`ColumnTypes()`を読み取り
+  `RowDescription`を構築。行を返さない文は`NoData`。`engine`側への新規API
+  追加は不要だった（想定どおり）
+- **エラー時は`Sync`まで後続メッセージを読み捨てる**（`extendedQueryConn.inError`、
+  `pgwire.go`のディスパッチループで管理）。`txState`（`'I'/'T'/'E'`）は
+  Simple Queryと共有の意味論——`Parse`/`Bind`/`Describe`/`Execute`/`Close`の
+  いずれかが失敗し、かつその時点で`'T'`（トランザクション中）なら`'E'`へ
+  遷移させる、という判定をディスパッチループに一元化（各ハンドラ個別には
+  実装しない設計とした）
+- **`watchForDisconnect`はExtended Queryには使わない（意図的な既知の制限）。**
+  Simple Queryは「クライアントは応答を受け取るまで次のメッセージを送らない」
+  という厳密な要求/応答プロトコルだが、Extended Queryはパイプライン化
+  （複数メッセージをまとめて送り、応答をまとめて受け取る）が正当な使い方
+  であるため、`watchForDisconnect`のバックグラウンド読み取り監視が
+  パイプライン中の正当なメッセージを切断と誤認しかねない。**結果、
+  Extended Query経由の実行中クエリは、クライアントが（TCP接続を切らずに）
+  消えても、次にこのループが`conn`から読み取ろうとするまで検知されない**
+  ——Step 7の実ドライバ確認で問題になれば見直す
+- `cmd/execdb/pgproto.go`: `ParseComplete`/`BindComplete`/`CloseComplete`/
+  `NoData`/`ParameterDescription`の各writerを追加
+- `cmd/execdb/pgwire.go`: `sendRows`から`sendDataRows`を切り出し
+  （`RowDescription`送信とデータ行送信を分離——`Execute`は`RowDescription`を
+  再送しない実PostgreSQL準拠のため）。`handleConnection`のディスパッチ
+  ループに`'P'/'B'/'D'/'E'/'H'/'C'/'S'`を追加
+- **重大な追加発見（実機確認で判明、当初のスコープ判断を覆す）:**
+  `pgx`のデフォルト（Extended Query）接続で`SELECT`した際、`int8`列が
+  `invalid length for int8: 1`のようなエラーで**接続できなかった**。
+  調べたところ`pgx`は`Bind`の`resultFormatCodes`で`int8`/`float8`/
+  `numeric`/`bool`/`bytea`/`timestamp`列に対し**デフォルトでバイナリ
+  結果形式を要求**していた——`bool`/`bytea`は**エラーにすらならず
+  黙って誤った値**（`bool`が常に`false`、`bytea`がテキストのバイト列を
+  そのまま返す）になっており、エラーになるケースより危険だった。
+  これはStep 1のスパイクでは検証していなかった観点（Describe/
+  プレースホルダ機構は確認したが、実際のpgx接続でのSELECT自体は
+  試していなかった）。ユーザーに相談の上、**int8/float8/bool/bytea/
+  timestampの5型のみバイナリ結果形式を実装**（NUMERICは対象外——
+  SQLiteのNUMERIC親和性は内部的に必ずINTEGER/REALで格納され真の
+  任意精度十進数を持たないため、Postgresの複雑なバイナリNUMERIC形式
+  （base-10000桁グループ）を実装する代わりに、**`columnOID`がNUMERIC
+  親和性の宣言型を実行時のGo動的型（int64/float64）でint8/float8へ
+  振り分ける設計に変更**し、`pgx`がそもそもNUMERIC OIDに対してバイナリを
+  要求する状況自体を発生させないようにした）
+  - `cmd/execdb/pgtype.go`: `pgColumn`に`binary bool`フィールドを追加。
+    `binaryCapableOIDs`（int8/float8/bool/bytea/timestampの5つ）。
+    `affinityOID`の戻り値を`(oid uint32, matched bool)`に変更し、
+    NUMERIC親和性の catch-all は`matched=false`を返すことで`columnOID`が
+    `scanTypeOID`（実行時のGo動的型サンプリング）へフォールバックする
+    設計に変更。`pgEncodeValue`が`useBinary bool`引数を受け取り、
+    `encodeBinary`（int8→8バイトbig-endian、float8→IEEE754 big-endian、
+    bool→1バイト、bytea→生バイト列そのまま、timestamp→Postgresエポック
+    （2000-01-01）からのマイクロ秒int64）で実際のバイナリ値を生成。
+    型不一致（アフィニティ違反）時はテキストへフォールバックし、
+    不正なバイナリペイロードを送らないようにガード
+  - `cmd/execdb/pgproto.go`: `writeRowDescription`が列ごとに実際の
+    フォーマットコード（binary=1/text=0）を送るよう変更
+  - `cmd/execdb/pgextended.go`: `buildResultColumns(cts, resultFormats)`
+    ヘルパーを追加——`Bind`が受け取った`resultFormatCodes`
+    （`portal.resultFormats`に保持）と`binaryCapableOIDs`の両方を
+    満たす列だけバイナリにする。`Describe`（statement）は`Bind`前なので
+    常にテキスト（`nil`を渡す）、`Describe`（portal）と`Execute`は
+    `portal.resultFormats`を使う
+  - 仕様書§8・`.claude/rules/pgwire.md`の採用範囲表・経緯説明を更新
+- 新規テスト:
+  - `pgextended_test.go`（新規）: メッセージ解析（`parseParseMessage`/
+    `parseBindMessage`のバイト列往復・不正形式）、`countPlaceholders`/
+    `formatCodeFor`の単体テスト、**`net.Pipe`越しに`handleConnection`を
+    実際に駆動するEnd-to-Endテスト**8本（フルラウンドトリップ、
+    statement/portal Describeの`ParameterDescription`/`RowDescription`/
+    `NoData`、名前付き文の使い回し、エラー→Sync読み捨て、`BEGIN`中の
+    エラーでの`'E'`遷移と`25P02`、`Close`後の再利用エラー、バイナリ
+    パラメータの拒否）
+  - **`net.Pipe`は完全同期・無バッファのため、複数メッセージを応答を
+    読まずに送ると自己デッドロックする**（送信側のWriteが受信側のReadを
+    待ち、受信側（サーバー）も自分の応答Writeが読まれるのを待つ、という
+    循環待機）。**送信をゴルーチン化する`sendPipelined`ヘルパーで回避**
+    ——これは同時に本物のExtended Queryパイプライン化の動作確認にもなる。
+    新しい知見として今後同種のテストを書く際の注意点
+  - `pgtype_test.go`: `affinityOID`の2値返却・NUMERIC catch-allの
+    `matched=false`確認、`pgEncodeValue`のテキスト/バイナリ両方の
+    テーブル駆動テスト、バイナリ⇔実際の値の型不一致時のテキスト
+    フォールバック確認
+- `tests/pgclient/main.go`は変更なし（Step 2の型付きScan検証がそのまま
+  Extended Queryパスの検証にも使える設計だった）
+- `tests/e2e.sh`: `tests/pgclient`を**`pgx`のデフォルト設定
+  （Extended Query、`default_query_exec_mode`指定なし）で実行**する
+  チェックを追加——これがStep 5の本来の目標（デフォルト設定接続）の
+  直接的な証明。Simple Query強制版は別の使い捨てスナップショット・
+  サーバー（`pgtcp2`、ポート15537）で独立に実行するよう分離
+  （同じテーブルに対し`checkTransactionIsolation`の固定値INSERTを
+  2回走らせると累積して失敗するため）
+- **副産物: e2e.shの手動デバッグ中に、前回の実行が残したオーバーフローの
+  孤児プロセス（ポート15532を掴んだまま）により、新しい`pgtcp`起動が
+  サイレントに失敗し、`wait_for_tcp`が古い孤児に接続してしまうという
+  問題に遭遇。** `start_server`はバックグラウンド起動の成否を確認せず、
+  `wait_for_tcp`も「誰か」がポートを掴んでいれば成功してしまうため、
+  孤児プロセスが残っていると気づかずに古いデータへテストしてしまう
+  （本セッションでの手動デバッグ由来の孤児であり、`tests/e2e.sh`自体の
+  既存の孤児処理——`SERVER_PIDS`配列＋`trap cleanup EXIT`——は正常に機能
+  している。ただし人手でバックグラウンドサーバーを都度起動して調査する際は、
+  作業後に確実に`kill`するか、`ps aux | grep execdb`で残存確認する習慣が
+  必要という教訓）
+- `make check`・`make race`・`make test`（e2e、2回連続実行でflakinessなし）
+  とも green を確認済み。依存追加なし
 
 ## フェーズ④への申し送り
 

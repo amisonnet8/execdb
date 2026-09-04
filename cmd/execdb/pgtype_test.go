@@ -55,8 +55,13 @@ func TestColumnOIDDeclaredTypes(t *testing.T) {
 	}
 
 	want := map[string]uint32{
+		// "num" is declared NUMERIC, SQLite's catch-all affinity bucket:
+		// columnOID falls back to the runtime Go type instead of a fixed
+		// numeric(1700) OID (phase 4 Step 5's finding -- see columnOID's
+		// doc comment), and the fixture's inserted value (1.5) scans as
+		// float64.
 		"i": oidInt8, "r": oidFloat8, "tx": oidText, "bl": oidBytea,
-		"num": oidNumeric, "vc": oidText, "bo": oidBool, "dt": oidTimestamp,
+		"num": oidFloat8, "vc": oidText, "bo": oidBool, "dt": oidTimestamp,
 	}
 	for _, ct := range cts {
 		if got := columnOID(ct); got != want[ct.Name()] {
@@ -121,32 +126,49 @@ func TestColumnOIDAffinityViolation(t *testing.T) {
 
 func TestAffinityOID(t *testing.T) {
 	cases := map[string]uint32{
-		"INTEGER":       oidInt8,
-		"INT":           oidInt8,
-		"BIGINT":        oidInt8,
-		"TEXT":          oidText,
-		"VARCHAR(10)":   oidText,
-		"CLOB":          oidText,
-		"BLOB":          oidBytea,
-		"REAL":          oidFloat8,
-		"FLOAT":         oidFloat8,
-		"DOUBLE":        oidFloat8,
-		"NUMERIC":       oidNumeric,
-		"DECIMAL(10,2)": oidNumeric,
-		"BOOLEAN":       oidBool,
-		"BOOL":          oidBool,
-		"DATE":          oidTimestamp,
-		"DATETIME":      oidTimestamp,
-		"TIMESTAMP":     oidTimestamp,
+		"INTEGER":     oidInt8,
+		"INT":         oidInt8,
+		"BIGINT":      oidInt8,
+		"TEXT":        oidText,
+		"VARCHAR(10)": oidText,
+		"CLOB":        oidText,
+		"BLOB":        oidBytea,
+		"REAL":        oidFloat8,
+		"FLOAT":       oidFloat8,
+		"DOUBLE":      oidFloat8,
+		"BOOLEAN":     oidBool,
+		"BOOL":        oidBool,
+		"DATE":        oidTimestamp,
+		"DATETIME":    oidTimestamp,
+		"TIMESTAMP":   oidTimestamp,
 	}
 	for decl, want := range cases {
-		if got := affinityOID(decl); got != want {
+		got, matched := affinityOID(decl)
+		if !matched {
+			t.Errorf("affinityOID(%q) matched = false, want true", decl)
+			continue
+		}
+		if got != want {
 			t.Errorf("affinityOID(%q) = %d, want %d", decl, got, want)
 		}
 	}
 }
 
-func TestPgEncodeValue(t *testing.T) {
+// TestAffinityOIDNumericCatchAll checks that SQLite's catch-all NUMERIC
+// affinity (anything not matching INT/CHAR|CLOB|TEXT/BLOB/REAL|FLOA|DOUB,
+// nor this package's own BOOL/DATE|TIME special cases) reports matched ==
+// false, so columnOID falls back to sampling the runtime Go type instead
+// of a fixed numeric(1700) OID (phase 4 Step 5's finding: real drivers
+// request PostgreSQL's binary NUMERIC format, which is not implemented).
+func TestAffinityOIDNumericCatchAll(t *testing.T) {
+	for _, decl := range []string{"NUMERIC", "DECIMAL(10,2)", ""} {
+		if _, matched := affinityOID(decl); matched {
+			t.Errorf("affinityOID(%q) matched = true, want false (NUMERIC catch-all)", decl)
+		}
+	}
+}
+
+func TestPgEncodeValueText(t *testing.T) {
 	cases := []struct {
 		name string
 		oid  uint32
@@ -166,13 +188,69 @@ func TestPgEncodeValue(t *testing.T) {
 		{"text", oidText, "hello", strPtr("hello")},
 	}
 	for _, c := range cases {
-		got := pgEncodeValue(c.oid, c.v)
+		got := pgEncodeValue(c.oid, false, c.v)
 		if (got == nil) != (c.want == nil) {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 			continue
 		}
 		if got != nil && *got != *c.want {
 			t.Errorf("%s: got %q, want %q", c.name, *got, *c.want)
+		}
+	}
+}
+
+// TestPgEncodeValueBinary checks the binary wire encodings real pgx
+// testing showed are required (phase 4 Step 5, PLAN.md): pgEncodeValue
+// with useBinary must produce PostgreSQL's actual binary format for each
+// of binaryCapableOIDs, not the text form.
+func TestPgEncodeValueBinary(t *testing.T) {
+	cases := []struct {
+		name string
+		oid  uint32
+		v    any
+		want []byte
+	}{
+		{"int8", oidInt8, int64(42), []byte{0, 0, 0, 0, 0, 0, 0, 42}},
+		{"int8 negative", oidInt8, int64(-1), []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}},
+		{"float8", oidFloat8, 1.0, []byte{0x3f, 0xf0, 0, 0, 0, 0, 0, 0}},
+		{"bool true (go bool)", oidBool, true, []byte{1}},
+		{"bool false (go bool)", oidBool, false, []byte{0}},
+		{"bool true (sqlite int64 1)", oidBool, int64(1), []byte{1}},
+		{"bool false (sqlite int64 0)", oidBool, int64(0), []byte{0}},
+		{"bytea is raw bytes unchanged", oidBytea, []byte{0x00, 0xff, 0x10}, []byte{0x00, 0xff, 0x10}},
+		{"timestamp at PostgreSQL epoch", oidTimestamp, pgEpoch, []byte{0, 0, 0, 0, 0, 0, 0, 0}},
+	}
+	for _, c := range cases {
+		got := pgEncodeValue(c.oid, true, c.v)
+		if got == nil {
+			t.Errorf("%s: got nil, want binary data", c.name)
+			continue
+		}
+		if string(c.want) != *got {
+			t.Errorf("%s: got % x, want % x", c.name, []byte(*got), c.want)
+		}
+	}
+}
+
+// TestPgEncodeValueBinaryFallsBackToTextOnMismatch checks that requesting
+// binary for a value whose actual Go type doesn't match what oid promised
+// (an affinity violation, PLAN.md's phase 4 Step 1 notes) falls back to
+// text instead of sending a malformed binary payload under a binary
+// format code.
+func TestPgEncodeValueBinaryFallsBackToTextOnMismatch(t *testing.T) {
+	got := pgEncodeValue(oidInt8, true, "not-a-number")
+	if got == nil || *got != "not-a-number" {
+		t.Errorf("got %v, want text fallback %q", got, "not-a-number")
+	}
+}
+
+// TestEncodeBinaryOnlyCoversBinaryCapableOIDs checks that oidText and the
+// NUMERIC OID constant (never advertised by columnOID any more, but kept
+// as a named constant) have no binary encoder.
+func TestEncodeBinaryOnlyCoversBinaryCapableOIDs(t *testing.T) {
+	for _, oid := range []uint32{oidText, oidNumeric} {
+		if _, ok := encodeBinary(oid, "x"); ok {
+			t.Errorf("encodeBinary(%d, ...) ok = true, want false (not binary-capable)", oid)
 		}
 	}
 }

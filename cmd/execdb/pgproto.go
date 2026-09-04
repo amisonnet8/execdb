@@ -167,7 +167,11 @@ func writeRowDescription(w io.Writer, cols []pgColumn) error {
 			b.int32(int32(c.oid))    // data type OID
 			b.int16(pgTypLen(c.oid)) // data type size
 			b.int32(-1)              // type modifier: none
-			b.int16(0)               // format code: text
+			if c.binary {
+				b.int16(1) // format code: binary (pgtype.go's pgEncodeValue)
+			} else {
+				b.int16(0) // format code: text
+			}
 		}
 	})
 }
@@ -203,6 +207,42 @@ func writeErrorResponse(w io.Writer, sqlstate, message string) error {
 		b.byte('M')
 		b.cstring(message)
 		b.byte(0)
+	})
+}
+
+// --- Extended Query response writers (spec §8, phase 4 Step 5) ---
+
+func writeParseComplete(w io.Writer) error {
+	return writeMessage(w, '1', func(b *msgBuilder) {})
+}
+
+func writeBindComplete(w io.Writer) error {
+	return writeMessage(w, '2', func(b *msgBuilder) {})
+}
+
+func writeCloseComplete(w io.Writer) error {
+	return writeMessage(w, '3', func(b *msgBuilder) {})
+}
+
+// writeNoData answers a Describe whose target does not return rows (a
+// non-row-returning statement, or one whose portal wraps one) -- the
+// Extended Query counterpart of Simple Query simply never sending a
+// RowDescription in that case.
+func writeNoData(w io.Writer) error {
+	return writeMessage(w, 'n', func(b *msgBuilder) {})
+}
+
+// writeParameterDescription answers a statement-level Describe's
+// parameter-type half. Every OID is 0 (unspecified) -- pgextended.go
+// never advertises a concrete parameter type, so a well-behaved client
+// sends every parameter in text format, which SQLite's dynamic typing
+// accepts directly (see pgextended.go's handleBind).
+func writeParameterDescription(w io.Writer, oids []uint32) error {
+	return writeMessage(w, 't', func(b *msgBuilder) {
+		b.int16(int16(len(oids)))
+		for _, oid := range oids {
+			b.int32(int32(oid))
+		}
 	})
 }
 

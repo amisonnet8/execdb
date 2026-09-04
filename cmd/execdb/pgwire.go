@@ -108,6 +108,8 @@ func handleConnection(conn net.Conn, db *engine.DB, user, password string) {
 	defer sess.Close()
 
 	params := newSessionParams(startupParameterStatus())
+	eq := newExtendedQueryConn()
+	defer eq.closeAll()
 	txState := byte('I')
 	for {
 		msg, err := readFrontendMessage(conn)
@@ -125,6 +127,64 @@ func handleConnection(conn net.Conn, db *engine.DB, user, password string) {
 			if err := writeReadyForQuery(conn, txState); err != nil {
 				return
 			}
+
+		// Extended Query (spec §8, phase 4 Step 5). Unlike 'Q' above,
+		// none of these use watchForDisconnect: a client may legitimately
+		// pipeline several of these messages back-to-back without
+		// waiting for a response to each one, so a background Read
+		// racing the main loop for the same bytes could mistake a
+		// pipelined message for a disconnect and cancel a query that is
+		// still perfectly healthy. The tradeoff (documented in
+		// PLAN.md's phase 4 Step 5 notes) is that a client vanishing
+		// mid-Execute without closing the TCP connection is only
+		// noticed the next time this loop tries to read from conn, not
+		// while that Execute is still running.
+		case 'P', 'B', 'D', 'E', 'H':
+			if eq.inError {
+				continue // real PostgreSQL's rule: skip to the next Sync
+			}
+			var ok bool
+			switch msg.Type {
+			case 'P':
+				ok, err = handleParse(ctx, conn, sess, eq, msg.Body)
+			case 'B':
+				ok, err = handleBind(conn, eq, msg.Body)
+			case 'D':
+				ok, err = handleDescribe(ctx, conn, sess, eq, msg.Body)
+			case 'E':
+				ok, txState, err = handleExecute(ctx, conn, eq, txState, msg.Body)
+			case 'H':
+				ok = true // Flush: a no-op, since responses are already sent as they're produced
+			}
+			if err != nil {
+				return
+			}
+			if !ok {
+				eq.inError = true
+				if txState == 'T' {
+					txState = 'E'
+				}
+			}
+		case 'C':
+			if eq.inError {
+				continue
+			}
+			ok, cerr := handleClose(conn, eq, msg.Body)
+			if cerr != nil {
+				return
+			}
+			if !ok {
+				eq.inError = true
+				if txState == 'T' {
+					txState = 'E'
+				}
+			}
+		case 'S':
+			eq.inError = false
+			if err := writeReadyForQuery(conn, txState); err != nil {
+				return
+			}
+
 		case 'X':
 			return
 		default:
@@ -335,19 +395,32 @@ func execOneStatement(ctx context.Context, conn net.Conn, sess *engine.Session, 
 	return true, writeCommandComplete(conn, commandTag(trimmed, result))
 }
 
-func sendRows(conn net.Conn, rows *sql.Rows) (ok bool, err error) {
+// sendRows sends rows' RowDescription (built from its live column types,
+// spec §8's type mapping) followed by every DataRow and a CommandComplete
+// (sendDataRows). Used by Simple Query (execOneStatement above), which
+// always announces a fresh RowDescription for each query.
+func sendRows(w io.Writer, rows *sql.Rows) (ok bool, err error) {
 	cts, cerr := rows.ColumnTypes()
 	if cerr != nil {
-		return false, writeErrorResponse(conn, sqlstateGeneric, cerr.Error())
+		return false, writeErrorResponse(w, sqlstateGeneric, cerr.Error())
 	}
 	cols := make([]pgColumn, len(cts))
 	for i, ct := range cts {
 		cols[i] = pgColumn{name: ct.Name(), oid: columnOID(ct)}
 	}
-	if err := writeRowDescription(conn, cols); err != nil {
+	if err := writeRowDescription(w, cols); err != nil {
 		return false, err
 	}
+	return sendDataRows(w, rows, cols)
+}
 
+// sendDataRows writes rows' remaining DataRows (each value encoded per
+// cols' OID via pgEncodeValue) followed by a CommandComplete("SELECT n")
+// tag. Split out from sendRows so pgextended.go's Execute can reuse it
+// without resending a RowDescription: real PostgreSQL's Execute only ever
+// emits DataRow/CommandComplete, relying on whatever RowDescription a
+// prior Describe already sent for the portal (or its statement).
+func sendDataRows(w io.Writer, rows *sql.Rows, cols []pgColumn) (ok bool, err error) {
 	vals := make([]any, len(cols))
 	ptrs := make([]any, len(cols))
 	for i := range vals {
@@ -357,21 +430,21 @@ func sendRows(conn net.Conn, rows *sql.Rows) (ok bool, err error) {
 	n := 0
 	for rows.Next() {
 		if serr := rows.Scan(ptrs...); serr != nil {
-			return false, writeErrorResponse(conn, sqlstateGeneric, serr.Error())
+			return false, writeErrorResponse(w, sqlstateGeneric, serr.Error())
 		}
 		fields := make([]*string, len(cols))
 		for i, v := range vals {
-			fields[i] = pgEncodeValue(cols[i].oid, v)
+			fields[i] = pgEncodeValue(cols[i].oid, cols[i].binary, v)
 		}
-		if err := writeDataRow(conn, fields); err != nil {
+		if err := writeDataRow(w, fields); err != nil {
 			return false, err
 		}
 		n++
 	}
 	if rerr := rows.Err(); rerr != nil {
-		return false, writeErrorResponse(conn, sqlstateGeneric, rerr.Error())
+		return false, writeErrorResponse(w, sqlstateGeneric, rerr.Error())
 	}
-	return true, writeCommandComplete(conn, fmt.Sprintf("SELECT %d", n))
+	return true, writeCommandComplete(w, fmt.Sprintf("SELECT %d", n))
 }
 
 // commandTag builds a PostgreSQL command tag for a non-row-returning

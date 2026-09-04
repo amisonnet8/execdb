@@ -368,9 +368,40 @@ Postgresプロトコルの全機能を実装するのではなく、接続・ク
 | 実装する | 実装しない（初期スコープ外） |
 | :--- | :--- |
 | 認証ハンドシェイク（デフォルト`trust`相当、`--user`指定時のみcleartext password認証。§9参照） | SCRAM/MD5等の認証方式 |
-| Simple Query プロトコル（`Query`メッセージ） | Extended Query プロトコル（プリペアドステートメント、`Parse`/`Bind`/`Execute`） |
-| `RowDescription` / `DataRow` / `CommandComplete` | `COPY`系プロトコル、LISTEN/NOTIFY |
+| Simple Query プロトコル（`Query`メッセージ） | `COPY`系プロトコル、LISTEN/NOTIFY |
+| Extended Query プロトコル（`Parse`/`Bind`/`Describe`/`Execute`/`Sync`/`Close`/`Flush`。フェーズ④Step 5で採用に変更——理由は下記） | バイナリ形式のパラメータ（`Bind`の値側。テキストのみ） |
+| 結果値のバイナリ形式（`int8`/`float8`/`bool`/`bytea`/`timestamp`の5型のみ。理由は下記） | NUMERICのバイナリ形式（複雑なため未実装。理由は下記） |
+| `RowDescription` / `DataRow` / `CommandComplete` | 行数制限付き実行・`PortalSuspended`（`Execute`のmaxRowsは無視し常に最後まで実行する） |
 | エラー応答（`ErrorResponse`） | 詳細なSQLSTATEコード体系（簡略化したコードで代用） |
+
+**Extended Queryを採用に変更した経緯（フェーズ④Step 1のスパイクで判明）:**
+Simple Queryのみの実装では、`pgx`（`default_query_exec_mode=simple_protocol`）や
+pgJDBC（`preferQueryMode=simple`）の明示指定が無いと接続できず、**Npgsqlに
+至っては常にExtended Queryを使うため接続そのものができない**——本節冒頭が
+掲げる「既存ドライバ資産がExecDB側の追加対応なしにそのまま接続できる」という
+目的と矛盾していたため、当初スコープ外としていたExtended Queryを採用に切り替えた
+（`.claude/rules/pgwire.md`参照）。
+
+SQLiteは`$1`形式のプレースホルダをネイティブに解釈できるため
+（実測確認済み）、SQL文の書き換え層は不要。`Describe`（statement）が要求する
+実行前の結果列情報は、全プレースホルダにNULLを仮バインドした試験実行
+（SAVEPOINT/ROLLBACKで囲む）から`ColumnTypes()`を読み取ることで得ており、
+`engine`側への新規API追加は不要だった。
+
+**結果値のバイナリ形式が必要になった経緯（フェーズ④Step 5、実機確認で判明）:**
+テキスト形式のみで実装したところ、`pgx`のデフォルト（Extended Query）接続で
+`int8`/`float8`/`numeric`/`bool`/`bytea`/`timestamp`列が軒並み失敗した
+（数値・日時型は明示的なエラー、`bool`/`bytea`は**エラーにならず黙って
+誤った値を返す**方が危険だった）。原因は`pgx`が`Bind`メッセージの
+`resultFormatCodes`で、これらの型に対しデフォルトでバイナリ形式を要求して
+くるため——ExecDB側でバイナリ結果値を実装しなければ、Extended Query採用の
+本来の目的（デフォルト設定での接続）が数値・BLOB・日時列を含む現実的な
+クエリでは達成できないことが判明した。NUMERICだけは対象外とした——SQLiteの
+NUMERIC親和性は内部的に必ずINTEGERかREALのいずれかで格納され（真の任意
+精度十進数を持たない）、Postgresの複雑なバイナリNUMERIC形式（base-10000
+桁グループ符号化）を実装する代わりに、NUMERIC親和性の宣言型は実行時のGo
+動的型（int64/float64）で`int8`/`float8`へ振り分ける設計とした（詳細は
+`cmd/execdb/pgtype.go`）。
 
 ### 認証（オプトイン、Zero-Authがデフォルト）
 

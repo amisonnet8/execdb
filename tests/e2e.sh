@@ -273,14 +273,30 @@ echo "$setshow_out" | tail -1 | grep -qx '3' \
 pass "pgwire TCP: SET/SHOW round trip within one connection"
 
 # --- tests/pgclient (pgx v5): a second, independent driver implementation ---
-# default_query_exec_mode=simple_protocol is required: pgx defaults to the
-# extended query protocol, which ExecDB does not implement in phase 1
-# (.claude/rules/pgwire.md).
-go run "$ROOT/tests/pgclient" "postgres://any@127.0.0.1:15532/any?sslmode=disable&default_query_exec_mode=simple_protocol" \
-  || fail "tests/pgclient (pgx) checks failed"
-pass "pgwire TCP: tests/pgclient (pgx) SELECT/NULL/DDL-rejection checks"
+# Run with pgx's own default query exec mode (Extended Query,
+# Parse/Bind/Describe/Execute/Sync -- phase 4 Step 5) first: this is the
+# actual point of Step 5, since pgx refuses to use Simple Query unless
+# explicitly told to (.claude/rules/pgwire.md's phase 1 note).
+go run "$ROOT/tests/pgclient" "postgres://any@127.0.0.1:15532/any?sslmode=disable" \
+  || fail "tests/pgclient (pgx, default Extended Query mode) checks failed"
+pass "pgwire TCP: tests/pgclient (pgx, default Extended Query mode) SELECT/NULL/DDL-rejection checks"
 
 stop_server "$pid"
+
+# Simple Query stays supported too (spec §8) -- run the same checks again
+# forcing it, as a regression check independent of Step 5's Extended Query
+# work. This needs its own fresh server (not the one above, now stopped):
+# tests/pgclient's checkTransactionIsolation inserts a fixed row and
+# expects to be the only one, so replaying the whole suite against a
+# table the first run already wrote to would see a stale extra row.
+cp "$WORK/snap1" "$WORK/pgtcp2"
+chmod +x "$WORK/pgtcp2"
+pid2=$(start_server "$WORK/pgtcp2" -n -p 127.0.0.1:15537 -q)
+wait_for_tcp 127.0.0.1 15537
+go run "$ROOT/tests/pgclient" "postgres://any@127.0.0.1:15537/any?sslmode=disable&default_query_exec_mode=simple_protocol" \
+  || fail "tests/pgclient (pgx, Simple Query mode) checks failed"
+pass "pgwire TCP: tests/pgclient (pgx, Simple Query mode) SELECT/NULL/DDL-rejection checks"
+stop_server "$pid2"
 
 # --- pgwire authentication: -u/--user cleartext password (spec §8, phase 4
 #     Step 4). Correct credentials connect; a wrong password or a
