@@ -136,8 +136,8 @@ DSN（`file:execdb?mode=memory&cache=shared`）を使っていても、`Deserial
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
-- 現在のフェーズ: ①ミニマム実装 — **Step 2完了**、Step 3（`cmd/execdb` CLI・
-  バナー・REPL）着手前
+- 現在のフェーズ: ①ミニマム実装 — **Step 3完了**、Step 4（pgwire＋
+  アクセス制御）着手前
 - 下準備として以下を作成済み（2026-09-03時点）:
   - `go.mod`（module: `github.com/amisonnet8/execdb`）
   - `LICENSE`（MIT, copyright: amisonnet8）
@@ -178,9 +178,38 @@ DSN（`file:execdb?mode=memory&cache=shared`）を使っていても、`Deserial
   - `make check`・`make build`（`cmd/execdb`込み）・`net`直接依存なしを確認済み
   - 仕様書§6（`Snapshot(path)`確定、`OpenSelf()`追加）・§4（`.load`のバージョン
     警告は呼び出し側責務）・naming.md（対応表更新）へ反映済み
-- 次のアクション: Step 3（`cmd/execdb` — CLI起動オプション、起動時バナー、
-  REPL、ドットコマンド）に着手する。特に`.overwrite`のREPL経由での実機確認を
-  優先する。
+- Step 3で以下を実施済み（2026-09-04時点）:
+  - `cmd/execdb/filename.go`（naming.mdのファイル名生成ルールを1関数
+    `snapshotFilename`に集約、`-o`/`-t`/`.snapshot`が共用）＋
+    `filename_test.go`（全パターンPASS）
+  - `cmd/execdb/format.go`（クエリ結果の出力、sqlite3の`list`モード相当
+    ＝`|`区切り・ヘッダなし・NULLは空文字列）
+  - `cmd/execdb/repl.go`（REPLループ、`.help`/`.exit`/`.quit`/`.tables`/
+    `.schema`/`.snapshot`/`.overwrite`/`.load`。`bufio.Scanner`のみ、
+    TTY判定は`os.ModeCharDevice`、非TTY時はプロンプト非表示）
+  - `cmd/execdb/main.go`（`flag`による起動オプション解析——長短フラグを
+    同一変数にバインド、`-h`/`--help`は`flag`パッケージの標準動作に委譲、
+    §10のバナー、`engine.OpenSelf()`、`-n`サーバーモードでの
+    SIGTERM/SIGINT自動保存）
+  - **`-p`/`--pg-addr`・`-s`/`--socket`はパースするが、指定時は
+    「未実装（Step 4で対応予定）」エラーで即終了する暫定実装**
+    （pgwire.go自体はStep 4で新設するため。banner内の"Listening on..."行も
+    Step 4まで表示しない）
+  - `-u`/`--user`・`-i`/`--snapshot-interval`は計画通り未実装
+    （`--help`にも出さない）
+  - **実機確認（`make build`成果物を一時ディレクトリへコピーして実施）**:
+    データなしバナー、`--help`/`-h`、パイプ経由のCREATE/INSERT/SELECT/
+    `.tables`/`.schema`、`.snapshot`で生成した実行ファイルの単体起動、
+    `.load`によるデータ取り込み、**`.overwrite`**（別コピーに対して実行し、
+    ファイルサイズ増加・`.execdb_old`の即時削除・再起動後のデータ残存・
+    バナーの"Loaded snapshot:"表示まで確認）、`-q`（バナー抑制）、
+    `-p`/`-s`未実装ガード、`-n`サーバーモード＋SIGTERM自動保存
+    （`-o`で指定したファイル名で保存されることも確認）——**すべて成功**
+  - `make check`・`go vet`とも問題なし
+- 次のアクション: Step 4（`cmd/execdb/pgwire.go`・`pgproto.go`・`access.go`
+  — TCP/UNIX Domain Socketのpgwire自前実装、DDL/ATTACH/PRAGMA/VACUUM等の
+  外部I/F拒否）に着手する。`-p`/`-s`の「未実装エラー」ガードを実際の
+  リスナー起動に置き換える。
 
 ## 保留事項
 
