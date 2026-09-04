@@ -108,6 +108,23 @@ out="$(printf '.load %s/snap1\nSELECT * FROM t;\n.exit\n' "$WORK" | "$WORK/loade
 echo "$out" | grep -qx '7' || fail ".load did not import the row from snap1"
 pass ".load: imports data from another ExecDB file"
 
+# --- .dump renders schema+data as SQL text, replayable by piping it into
+# a fresh REPL process (spec §3, §5 use case 2: sharing a data state).
+# The seeded schema deliberately has no TRIGGER: the REPL's own
+# line-based statement reader (access.go's scanStatements) does not
+# understand a CREATE TRIGGER body's internal ";" the way SQLite's own
+# tokenizer does when a whole script is executed in one call, so a
+# trigger's dump cannot currently be replayed this way (see
+# cmd/execdb/dump_test.go's TestDumpRoundTrip, which instead validates
+# .dump's own SQL text directly against that same case). ---
+cp "$BIN" "$WORK/dumpsrc"
+dump_out="$(printf 'CREATE TABLE t(a INTEGER PRIMARY KEY AUTOINCREMENT, b TEXT);\nINSERT INTO t(b) VALUES (%s);\nINSERT INTO t(b) VALUES (NULL);\nCREATE INDEX idx_t_b ON t(b);\n.dump\n.exit\n' "'it''s'" | "$WORK/dumpsrc")"
+cp "$BIN" "$WORK/dumptarget"
+out="$(printf '%s\nSELECT a, b FROM t ORDER BY a;\n.exit\n' "$dump_out" | "$WORK/dumptarget")"
+echo "$out" | grep -qx "1|it's" || fail ".dump output did not replay the first row correctly (got: $out)"
+echo "$out" | grep -qx '2|' || fail ".dump output did not replay the NULL row correctly (got: $out)"
+pass ".dump: schema and data replay correctly when piped into a fresh REPL"
+
 # --- .overwrite persists into the running executable (spec §4, §7) ---
 cp "$BIN" "$WORK/ow"
 before_size=$(wc -c <"$WORK/ow")

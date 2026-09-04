@@ -330,6 +330,54 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
     5モード×ヘッダ有無のゴールデンテストを実施、全PASS
   - `make check`・`make test`（e2e、全項目PASS）とも green を確認済み。
     実機確認（`bin/execdb`直接実行）で全5モードの出力を確認済み
+- **フェーズ③Step 3（`.dump`）完了（2026-09-04）。**
+  - `cmd/execdb/dump.go`（新規）: `.dump [PATTERN]`。`PRAGMA foreign_keys=OFF;`→
+    `BEGIN TRANSACTION;`→（各テーブルの`CREATE TABLE`→そのテーブルの`INSERT`、
+    `sqlite_master`の自然順）→（`sqlite_sequence`が存在し行があれば
+    `DELETE FROM sqlite_sequence;`＋復元INSERT）→（`tbl_name`列でPATTERNに
+    紐づくindex/view/trigger、`sql IS NOT NULL`で暗黙のautoindexを除外）→
+    `COMMIT;`。**リテラル化はSQLite自身の`quote()`関数に委譲**（Go側でNULL/
+    BLOB/TEXTを型スイッチで判別しようとすると、`Scan`後はBLOBの文字列化と
+    TEXTが両方ともGoの`string`になり区別できないため。列名一覧は
+    `pragma_table_info(?)`——バインドパラメータを受け付ける関数形式——で取得。
+    識別子は`quoteIdent`で`"`エスケープ）
+  - `cmd/execdb/repl.go`: `.dump`ディスパッチ・`.help`追記
+  - 新規テスト`dump_test.go`: TEXT/BLOB/NULL/REAL/AUTOINCREMENT/INDEX/VIEW/
+    TRIGGERを含むDBで`.dump`し、出力を空DBへ`sess.Exec(dump)`（1回のExec
+    呼び出し）で流し込むラウンドトリップテスト、および`PATTERN`引数で
+    対象テーブルを絞るテスト。全PASS
+  - e2eに`.dump`→別プロセスのREPLへパイプ→`SELECT`で確認するチェックを追加
+    （トリガーを含まないスキーマで検証——理由は下記の発見を参照）
+  - `make check`・`make race`・`make test`（e2e、全項目PASS）とも green
+  - **副産物として、2つの実装上の発見があった:**
+    1. **REPLの行ベース文スキャナ（Step 1の`scanStatements`）は
+       `CREATE TRIGGER ... BEGIN ...; ... END;`のような複合文本体の内部`;`を
+       理解できず、そのままREPLへ手入力・ペーストしても`SQL logic error:
+       incomplete input`で壊れることを確認した（`.dump`固有の問題ではなく、
+       Step 1で作った文スキャナ自体の既存の制約——`quote()`/リテラル/
+       コメントは理解するが、BEGIN...END複合文構造は理解しない）。
+       本家`sqlite3`はこれを`sqlite3_complete()`という専用のトークナイザで
+       解決しているが、同等の実装はナイーブな文字列ベースのBEGIN/END深さ
+       カウントでは「CASE式のEND」との衝突などの誤検出リスクがあり、
+       安全に実装するには相応の設計が必要と判断。**フェーズ③の計画外の
+       スコープ拡大を避けるため、Step 3では対応せず既知の制限として
+       ここに記録する**（`.dump`自体のSQL生成が正しいことは
+       `sess.Exec()`への一括流し込みで検証済み——問題は`.dump`の出力側
+       ではなく、REPL入力側の受け取り方にある）。トリガーを含むDBを
+       REPL標準入力へ直接ペースト・パイプする運用は、この制約を踏む
+       可能性がある。対応する場合は新しいルール
+       （`.claude/rules/`への追記）または新規Stepとして提案する
+    2. **`gofmt -s`（Go 1.26.7で確認）は、宣言直前のdocコメント内に隣接する
+       `''`（アポストロフィ2つ）があると、これを単一の右巻きクォート文字
+       `”`（U+201D）へ書き換える。** これは`go/doc/comment`パッケージによる
+       doc comment整形の一部で、宣言に紐付かない通常のインラインコメント
+       （関数内の一行コメント等）には影響しない。SQL の `''`
+       エスケープ規則を説明するdocコメントを書く際に踏みやすい
+       （`dump.go`のコメントで実際に踏んだ）。**回避策: docコメント内で
+       `''`を隣接させず、単語で説明する**（本セッションでは実施済み）。
+       このプロジェクトの`fmt-check`は`gofmt -s -l .`を使うため、
+       CIでも同じ書き換えが必要になる——`.claude/rules/`への追記を提案する
+       （どのファイルが適切かは要検討。`testing.md`または新規ファイル）
 - 下準備として以下を作成済み（2026-09-03時点）:
   - `go.mod`（module: `github.com/amisonnet8/execdb`）
   - `LICENSE`（MIT, copyright: amisonnet8）
