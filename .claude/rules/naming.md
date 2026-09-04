@@ -15,7 +15,7 @@ ExecDB では、REPLコマンド・CLI起動オプション・`engine`パッケ�
 | `.load` | ─（REPL専用、CLI起動オプションなし） | `db.Load(path string)` |
 | ─（起動時に暗黙実行） | ─ | `engine.OpenSelf()` |
 | ─（ライブラリ専用、REPL/CLIの対応なし） | ─ | `engine.Open(path string)` / `engine.New()` |
-| ─（ライブラリ専用。`cmd/execdb`のREPL/pgwireがそれぞれ内部で1本ずつ保持する想定） | ─ | `db.Session(ctx context.Context)` |
+| ─（ライブラリ専用。`cmd/execdb`のREPLは起動時に1本、pgwireはTCP/UDS1接続につき1本を保持する） | ─ | `db.Session(ctx context.Context)` |
 | ─（ライブラリ専用、`.load`のio.Reader版） | ─ | `db.LoadFrom(r io.Reader)` |
 
 `engine.OpenSelf()` / `engine.Open()` / `engine.New()` / `db.Session()` /

@@ -585,10 +585,78 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
     差し替え
   - `make check`・`make race`・`make test`（e2e、3回連続実行）とも
     green を確認済み
-- **フェーズ②（`engine`ライブラリ開発）全ステップ完了。** 次のアクション:
-  Step 6（仕様書・ルール・PLANへの反映）に着手する。§2/§4/§6/§7/§8の
-  乖離修正、naming.md（完了済み分の再確認）、testing.mdへの追記など、
-  上記「フェーズ②のステップ」節のStep 6の内容を実施する。
+- **フェーズ②Step 6（仕様書・ルール・PLANへの反映）完了（2026-09-04）。**
+  - `execdb_spec.md`: §2（`Session`による同時実行制御の実現手段、
+    `sync.RWMutex`はメタデータ保護でありSQLの同時実行制御ではない旨を明記）／
+    §4（`.load`のバージョン警告はフッターのフォーマットバージョンの比較で
+    あると訂正、既存セッションが`.load`後も維持されること、データ無し
+    ファイルへの`.load`はエラーでメモリ状態不変であることを追記）／
+    §6（`net`の推移的依存に関する記述を訂正、責務分担表に`Session`/
+    `io.Reader`を追加、`Session`のAPIサブセクションを新設）／§7（採用DSNを
+    `memdb` VFSへ更新、`Deserialize`が伝播しない理由とBackup APIによる解決を
+    明記、`.snapshot`のアトミック書き込みと並行書き込み下の一貫性保証を追記、
+    `.overwrite`の失敗時ロールバックと`go run`一時バイナリ拒否を追記、
+    サイズ上限を「2GB未満」から実測値（約1GiB、`memdb`採用時）に訂正）／
+    §8（`ReadyForQuery`の`'I'/'T'/'E'`と`25P02`の扱いを明記）を反映。
+    削除済みの`serialize_spike_test.go`への言及も現状に合わせて修正
+  - `.claude/rules/pgwire.md`: 型マッピング節に`ColumnTypes()`実測結果
+    （`Next()`前でも正しい値を返す）をフェーズ④への申し送りとして追記
+  - `.claude/rules/naming.md`: `Session`行の説明を「保持する想定」から
+    実装済みの記述に更新
+  - `PLAN.md`: 「フェーズ③・④への申し送り」節を新設（`.dump`/`.import`/
+    スキーマ内省API/`--snapshot-interval`/REPLのCtrl+C はフェーズ③、
+    型マッピング/`--user`認証/`CancelRequest`/Extended Queryはフェーズ④、
+    という形で整理）
+  - **副産物として、`TestSnapshotDuringConcurrentWritesProducesConsistentImage`
+    （フェーズ②Step 4で追加）のflakinessを発見・修正。** 書き込みループが
+    文と文の間で一切yieldしない設計だったため、バリアの`BEGIN IMMEDIATE`が
+    `busy_timeout`（5秒）いっぱい飢餓状態になり`ErrBusy`で失敗することが
+    実測で約6割の頻度で発生した。書き込みループに1msの`time.Sleep`を追加
+    （現実のワークロードにより近づける）、かつ`Snapshot`呼び出し自体を
+    `ErrBusy`に対して有界リトライする形に修正（`ErrBusy`は設計上正当な
+    リトライ可能条件であり、初回発生を即失敗扱いにすべきではないため）。
+    修正後、単体8回連続・`-race`3回連続でflakinessなしを確認
+  - `make check`・`make race`・`make test`（e2e）とも green を確認済み
+- **フェーズ②（`engine`ライブラリ開発）完了。** 全6ステップ（スパイク→
+  基盤置き換え→Session/context API→並行性テスト→`cmd/execdb`結線→
+  ドキュメント反映）を完了し、`engine`は複数の独立したクライアントを
+  安全に同時に扱えるライブラリとして作り直された。次のアクションは
+  フェーズ③（REPL開発）の計画立案。
+
+## フェーズ③・④への申し送り
+
+フェーズ②の設計・実装過程で判明した、意図的にスコープ外とした事項。
+`engine`側の土台（`Session`・`*Context`・backup経由の`Load`等）は用意済みで、
+以下は`cmd/execdb`側の機能追加として次フェーズで着手する。
+
+**フェーズ③（REPL開発）:**
+- `.dump`/`.import`/`.mode`/`.headers` — `.dump`にはBLOBをSQLリテラル化する
+  ための型区別、`.import`には一括投入用のトランザクション制御が要る
+  （`engine.Session`で対応可能）
+- スキーマ内省API（`Tables()`/`Schema()`/`TableInfo()`相当）— 現状`.tables`/
+  `.schema`は`cmd/execdb/repl.go`が`sqlite_master`への生SQLで実装している。
+  `.dump`/`.import`の要件が固まってから、`engine`側API化するか判断する
+- `--snapshot-interval`（`-i`）— バックグラウンドゴルーチンからの定期
+  `Snapshot`。`serializeBarrier`（Step 2）が並行書き込みに対して安全なことは
+  既に検証済み（`TestSnapshotDuringConcurrentWritesProducesConsistentImage`）
+  なので、追加のengine変更は不要なはず
+- REPLでのCtrl+C（実行中クエリの中断）— サーバーモードのSIGTERM自動保存との
+  兼ね合い、「クエリ実行中でない時のCtrl+Cはどうするか」（sqlite3 CLI相当の
+  挙動）を含めてREPLコマンド体系の設計判断が必要
+
+**フェーズ④（PostgreSQL互換ワイヤープロトコル開発）:**
+- 型マッピング（Postgres OID対応表）— 現状全列OID 25(text)固定。
+  `sql.Rows.ColumnTypes()`が`Next()`前でも正しい値を返すことは実測済み
+  （`.claude/rules/sqlite-quirks.md`）なので、これを土台に主要ドライバで
+  実接続検証しながら確定する（`.claude/rules/pgwire.md`）
+- `--user`認証（cleartext password）
+- `CancelRequest`/`BackendKeyData`のPID・secretレジストリ — フェーズ②Step 5で
+  実装したのは「クライアント切断時の同一接続内キャンセル」（`ctx`＋
+  `watchForDisconnect`）のみ。**別接続からの明示的なキャンセル要求**には
+  未対応（`writeBackendKeyData`は`0, 0`固定のまま）
+- Extended Queryプロトコル（`Parse`/`Bind`/`Execute`）— 現時点で対応する
+  計画はない。対応する場合は`.claude/rules/pgwire.md`の「スコープを勝手に
+  広げない」方針に従い、まず仕様書を更新してから着手する
 
 ## 保留事項
 

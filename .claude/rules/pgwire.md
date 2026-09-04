@@ -23,6 +23,14 @@ SQLiteは動的型付け（型アフィニティ）のため、列の値の型�
 **主要ドライバ（pgJDBC/psycopg等）で実接続検証しながら確定する**（現時点で
 確定した対応表はない。決め打ちで実装せず、実際に繋いで確認すること）。
 
+**フェーズ④への申し送り（フェーズ②Step 1実測済み）:** `sql.Rows.ColumnTypes()`
+は`modernc.org/sqlite`で`Next()`呼び出し前でも`DatabaseTypeName()`/`ScanType()`/
+`Nullable()`が正しい値を返すことを実測確認済み（`INTEGER`/`REAL`/`TEXT`/`BLOB`/
+`NUMERIC`列、および式列——`dbType`は空文字列、`scanType`は`int64`——で確認。
+詳細は`.claude/rules/sqlite-quirks.md`「`ColumnTypes()`は`Next()`呼び出し前でも
+正しい値を返す」節）。型マッピング実装時はこのAPIをそのまま使ってよく、
+「`Next()`前は不定かもしれない」と慎重になる必要はない。
+
 ## 認証（オプトイン、Zero-Authがデフォルト）
 
 - **デフォルト（`--user`未指定）:** 常にZero-Auth（`trust`相当）。
