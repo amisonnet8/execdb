@@ -274,9 +274,9 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
-- 現在のフェーズ: **③REPL開発完了**。次はフェーズ④（PostgreSQL互換ワイヤー
-  プロトコル開発）の計画立案から。詳細は下記「フェーズ③のステップ」節・
-  「フェーズ④への申し送り」節を参照。
+- 現在のフェーズ: **④PostgreSQL互換ワイヤープロトコル開発、計画立案・
+  Step 1（スパイク）完了**。次はStep 2（型マッピング）から。詳細は下記
+  「フェーズ④のステップ」節・「フェーズ④Step 1で確定した事実」節を参照。
 - **フェーズ③Step 1（REPL基盤の再構築）完了（2026-09-04）。**
   - `cmd/execdb/access.go`: `splitStatements`から`scanStatements(sql) (complete []string,
     remainder string)`を切り出し（`splitStatements`はremainderが非空白なら末尾へ追加する
@@ -941,6 +941,152 @@ REPL開発フェーズは、以下のステップで進める（2026-09-04、計
 
 計画の全文は `/home/vscode/.claude/plans/step-step-step-crispy-graham.md` を参照
 （セッションログにも詳細が残る）。
+
+## フェーズ④のステップ
+
+PostgreSQL互換ワイヤープロトコル開発フェーズは、以下のステップで進める
+（2026-09-04、計画レビュー済み）。ゴールは「主要なPostgreSQLドライバが
+デフォルト設定のまま、正しい型で、必要なら認証付きで接続・利用できる状態に
+外部I/Fを完成させること」。
+
+**計画時の調査で判明した、フェーズ③申し送りに無かった重要事実:**
+
+| # | 事実 |
+| :-- | :--- |
+| P4-1 | Simple Queryのみの実装では主要ドライバがデフォルト設定で接続できない。`pgx`は`default_query_exec_mode=simple_protocol`、pgJDBCは`preferQueryMode=simple`の明示指定が必要、**Npgsqlは常にExtended Queryのため接続不可**——仕様書§8の狙いと衝突 |
+| P4-2 | pgJDBCは接続直後に`SET extra_float_digits = 3`等を送る。SQLiteは`SET`を解釈できず、現状は素通しして構文エラーになり接続が確立しない（`checkExternalAccess`の拒否対象にも入っていない） |
+| P4-3 | devcontainerには`python3`と`psql`しか無い（`pip`/`java`/`node`/`dotnet`は未導入） |
+
+**この計画で確定した方針:**
+
+| 論点 | 決定 |
+| :--- | :--- |
+| Extended Query プロトコル | 実装する（Step 5着手前に仕様書§8の採用範囲表を先行更新） |
+| 他言語ドライバ検証の範囲 | Python（psycopg）・Java（pgJDBC）・Node.js（node-postgres）。.NET（Npgsql）は見送り、Extended Query実装により接続可能になっている前提だけ整えて申し送る |
+| 型マッピングの積極性 | Step 1のスパイクで`ColumnTypes()`を実測してから確定（アフィニティ違反値の実際の挙動を見てから判断） |
+| 他言語ランタイムの導入 | 都度インストールし保留事項へ記録、フェーズ④完了時（Step 8）にdevcontainer.jsonへ統合 |
+
+**ステップ構成:**
+
+1. **Step 1: スパイク【意思決定ゲート】** — `ColumnTypes()`の網羅実測（宣言型別・
+   式/集約・アフィニティ違反値）で型マッピング表を確定。各ドライバ（psql/psycopg/
+   pgJDBC/node-postgres）のメッセージ列を記録用サーバーで実測しStep 3/5のスコープを
+   確定。SQLiteが`$1`プレースホルダを解釈できるか、prepared statementから実行前に
+   列情報を取れるかを検証。
+2. **Step 2: 型マッピング** — `RowDescription`のOID化、`bytea`/`float8`等の
+   Postgresテキスト形式エンコード（`pgtype.go`新設）。
+3. **Step 3: `SET`/`SHOW`互換シム** — pgwire層で横取りしSQLiteへ渡さない
+   （`pgsession.go`新設）。
+4. **Step 4: `-u`/`--user`認証** — cleartext password。`golang.org/x/term`を
+   新規依存として追加（要確認）。
+5. **Step 5: Extended Query プロトコル** — Parse/Bind/Describe/Execute/Sync/Close/
+   Flush。エラー時はSyncまで読み捨てる同期規則、`watchForDisconnect`の前提見直しが
+   最大の難所。
+6. **Step 6: `CancelRequest`/`BackendKeyData`** — 接続ごとのPID/secretレジストリ。
+7. **Step 7: 他言語ドライバ検証＋CI** — Python/Java/Nodeを都度導入、`tests/drivers/`、
+   CIに`drivers`ジョブ新設（ubuntu限定）。
+8. **Step 8: 仕様書・ルール・PLAN・devcontainer統合** — フェーズ④・全実装の締め。
+   `PLAN.md`の「devcontainer.json反映待ちリスト」をここで消化する。
+
+**フェーズ④完了の判定:** `make check`/`make race`/`make test`が通る／`pgx`・pgJDBC・
+node-postgres・psycopgがデフォルト設定のまま接続しSELECT/DML/トランザクションが
+動く／数値・BLOB列が各ドライバの型付きAPIで読める／DDLが全ドライバから42501で
+拒否される／`-u`認証（正誤パスワード・`EXECDB_PASSWORD`優先・`--no-repl`未設定時の
+起動中止）が動く／別接続からの`CancelRequest`で実行中クエリが中断される／
+GitHub Actions（3OS＋race＋trivy＋drivers）がgreen／仕様書と`.claude/rules/`が
+実装と一致／devcontainer.jsonの反映待ちリストが空になる。
+
+計画の全文は `/home/vscode/.claude/plans/step-step-step-crispy-graham.md` を参照。
+
+## フェーズ④Step 1で確定した事実（型マッピング・プレースホルダ・Describe、2026-09-04実測）
+
+`/tmp`の使い捨てGoプログラム（コミットせず。`modernc.org/sqlite`直結、`engine`は
+経由しない素の`database/sql`実験）で実測。
+
+### (a) `ColumnTypes()`の網羅実測 → 型マッピング方針を確定
+
+- **`DatabaseTypeName()`（宣言型）はSQLiteの`decltype`文字列をそのまま返す
+  （`VARCHAR(10)`/`DECIMAL(10,2)`/`BOOLEAN`/`DATETIME`のようにSQLite標準5分類へ
+  正規化されない）。** OID決定には、SQLiteの型アフィニティ判定アルゴリズム
+  （`decltype`に`INT`/`CHAR|CLOB|TEXT`/`BLOB`/`REAL|FLOA|DOUB`のいずれの部分文字列も
+  含まれなければNUMERIC扱い、という公式ルール）をこちらで実装する必要がある。
+- **式・集約・リテラル列（`decltype`が空文字列）でも、`ColumnTypes()`を`Next()`前に
+  呼ぶと`ScanType()`が実際の値の型を返す。** `1+1`→`int64`、`'x'`→`string`、
+  `x'00ff'`→`[]uint8`、`CASE...END`→`string`、`NULL`単体リテラル→`nil`
+  （フェーズ②で確認済みの「`Next()`前でも正しい値を返す」の追加実測——**内部で
+  最初の1行を先読みしている**ことが今回判明。空の結果セット（`WHERE 0`等）では
+  `ScanType()`は`nil`に戻る）。
+- **重大な罠: `ScanType()`が示す型と、実際に`interface{}`へ`Scan`した際に返る
+  Goの動的型は一致しないことがある。** `BOOLEAN`宣言列は`ScanType()`が`bool`を
+  返すが、`interface{}`へ`Scan`すると実際には`int64(1)`が返る（SQLiteは真の
+  bool型を持たず整数格納のため）。**OIDを決めるための型情報と、実際の値を
+  Postgresテキスト形式へエンコードする処理は別々に設計する必要がある**
+  （前者は`DatabaseTypeName()`ベースのアフィニティ判定、後者は`Scan`後の
+  実際のGo動的型に対する型スイッチ、の二段構え）。
+- **型アフィニティに反する値（`INTEGER`列に`'hello'`を`INSERT`等）は、
+  `DatabaseTypeName()`は宣言どおり`"INTEGER"`のままだが、`Scan`結果は
+  `string`になる。** 積極的にOIDをマップする以上、この不一致は原理的に
+  残る既知の制限として扱う（宣言型に反するデータを意図的に入れた場合のみ
+  発生し、正規のワークロードでは稀という判断）。
+- **`DATETIME`宣言列は、文字列を`INSERT`しても`Scan`結果が`time.Time`になる**
+  （`modernc.org/sqlite`が`decltype`に`DATE`/`TIME`を含む列を検出して自動変換
+  している）。OIDマッピングは`BOOLEAN`・`DATE`/`DATETIME`/`TIMESTAMP`を
+  アフィニティ判定より優先する特別扱いとする。
+- ビュー・サブクエリ経由の列は、元の宣言型（`INTEGER`/`TEXT`等）をそのまま
+  引き継ぐ（アフィニティ判定がそのまま使える）。
+
+**→ 決定: OID決定は`DatabaseTypeName()`（宣言型）ベースのアフィニティ判定を
+第一優先とし、`BOOLEAN`/`DATE`系は特別扱い、宣言型が空（式・集約・リテラル列）
+の場合のみ`ScanType()`（先頭行の実測値）にフォールバックする。空の結果セット
+かつ宣言型も無い場合はtext(25)を最終フォールバックとする。値のテキスト
+エンコードは常に`Scan`後の実際のGo動的型を型スイッチして行い、OIDとの
+不一致（アフィニティ違反・`BOOLEAN`のint64等）はエンコード側で吸収する。**
+
+### (c)-1 `$1`形式のプレースホルダはSQLiteがネイティブに解釈できる
+
+`SELECT ... WHERE a = $1`（`db.Query(query, 2)`）、`$2`/`$1`のような番号の
+飛び・逆順混在も含めて**無変換でそのまま動作することを確認**（SQLiteの
+`$AAAA`パラメータ構文はAAAA部分に数字も許容するため、たまたまPostgresの
+`$N`と表記が一致する）。**→ 決定: Extended QueryのSQL文はプレースホルダの
+書き換え層なしでそのまま`Session.PrepareContext`へ渡せる。**
+
+### (c)-2 statement-level Describe（`RowDescription`をBind前に返す）は新規engine APIなしで実現できる
+
+`Prepare`した文に対し、**全プレースホルダへNULLを仮バインドして実行**
+（`stmt.Query(nil, nil, ...)`）すると、行が0件でも宣言型ベースの
+`ColumnTypes()`は正しく返ることを確認（`WHERE a = $1`にNULLを渡すと
+0件になるが、列のdecltypeは`a INTEGER`のまま正しく取得できた）。
+一方、**プレースホルダの値そのものに依存する式列（`SELECT $1 + 1`）は
+NULL仮バインドだと`ScanType()`も`nil`になり型を特定できない**——これは
+Postgres本来のDescribeでも原理的に難しい领域（パラメータ値未確定の時点では
+式の結果型を静的に知りようがない）ので、text(25)へのフォールバックで
+妥当と判断。
+
+**→ 決定: `engine/describe.go`は不要。** `cmd/execdb`側で
+①`looksLikeRowReturning`（既存, `access.go`）で行を返す文か判定
+②SQL文中の`$N`/`?`の個数をテキストスキャンで数える（新規の軽量ヘルパー、
+SQLiteのC APIやreflectionは使わない）
+③行を返す文なら、SAVEPOINT/ROLLBACKで囲んだ上で全プレースホルダにNULLを
+バインドして試験実行し、その`ColumnTypes()`から`RowDescription`を構築
+④行を返さない文は`ParameterDescription`＋`NoData`のみ返す
+という設計で完結する。**SAVEPOINT/ROLLBACKで囲むのは、`INSERT ... RETURNING`
+のような「構文上はINSERTだが行を返す」文を万一`looksLikeRowReturning`が
+取りこぼした場合の安全網**（副産物として、`looksLikeRowReturning`が
+`RETURNING`句を考慮していない既存の抜けを発見——`INSERT/UPDATE/DELETE ...
+RETURNING`は本来行を返すが、現在のSimple Query経路（`pgwire.go`の
+`execOneStatement`）も含めてExecContextで処理してしまい、RETURNING結果が
+握りつぶされる。**Step 2または5で`looksLikeRowReturning`にRETURNING検出を
+追加し修正する**——新規の発見だがフェーズ④のスコープ内で自然に直る)。
+
+### (b) ドライバのメッセージ列の実機捕捉は今回省略、Step 5/7の実接続で確認する方針に変更
+
+`psql`以外（psycopg/pgJDBC/node-postgres）は現時点でdevcontainerに未導入。
+Extended Queryのメッセージフロー自体はPostgreSQLプロトコル仕様として
+標準化・安定しているため、記録用サーバーでの実機捕捉は行わず、Step 5の
+実装はプロトコル仕様に基づいて進め、**Step 7の実ドライバ接続で得られる
+差異（pgJDBCの`SET`送出等、P4-2で既知）に対して都度対応する**方針とする
+（フェーズ③がStep 3→Step 4で実施したのと同じ「実装→実機確認→ギャップ
+発覚→追加対応」のサイクルを踏襲）。
 
 ## フェーズ④への申し送り
 
