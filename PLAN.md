@@ -278,9 +278,24 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
   かつ当初計画していた4フェーズ（①〜④）すべてが完了（2026-09-04）。**
   詳細は下記「フェーズ④（PostgreSQL互換ワイヤープロトコル開発）完了」節・
   「フェーズ④Step 8（仕様書・ルール・PLAN・devcontainer統合）完了」節を参照。
-  次のアクションは、ユーザーとの相談で決めた新しい作業（`docs/`への
-  ドキュメント再構成→`tour/`入門ガイドの順、フェーズ④とは別枠のStep 9/10と
-  して進める予定）の計画・着手待ち。
+  フェーズ④完了後、ユーザーとの相談で`docs/`への再構成（Step 9）→
+  `tour/`入門ガイド（Step 10）という別枠の作業を追加することに決定。
+- **Step 9（`docs/`への再構成、`tour/`を除く）完了（2026-09-04）。**
+  `execdb_spec.md`を`docs/spec/execdb_spec.md`へ移動（単一ファイルのまま、
+  章立て・§番号は不変。ユーザー承認済みの方針——「CLAUDE.md/.claude/rules/等
+  からの`execdb_spec.md§N`という節番号ベースの引用は移動後もそのまま通用する
+  ので更新不要、パスを明記している箇所（`CLAUDE.md`の参照ファイル一覧、
+  `directory-structure.md`のツリー図）だけ更新する」）。`docs/usage/`
+  （CLIオプション・REPLコマンドのリファレンス、2ファイル）・`docs/examples/`
+  （CI/CDテストDB・バグ再現共有・モックAPIサーバー・SQLサンドボックスの
+  4本、実際に`bin/execdb`へ流し込んで出力を実測検証済み）を新設。
+  `README.md`/`README_ja.md`を、開発初期のまま放置されていた
+  「早期開発段階・動作するビルドなし」というプレースホルダから、
+  実際に動くクイックスタート（`go install`→REPL起動→`.snapshot`→
+  スナップショット実行、という一連の流れ）へ全面書き換え——全リンクは
+  スクリプトで解決確認済み。`.claude/rules/directory-structure.md`の
+  ツリー図・補足説明を新しい`docs/`構成に合わせて更新（`tests/`と
+  `docs/examples/`の役割の違いも明記）。`make check`・`make test`とも green
 - **フェーズ③Step 1（REPL基盤の再構築）完了（2026-09-04）。**
   - `cmd/execdb/access.go`: `splitStatements`から`scanStatements(sql) (complete []string,
     remainder string)`を切り出し（`splitStatements`はremainderが非空白なら末尾へ追加する

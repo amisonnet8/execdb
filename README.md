@@ -14,11 +14,60 @@ commit like any other file.
 External clients (ORMs, DB tools, language drivers) can connect over a
 PostgreSQL-compatible wire protocol subset, so existing Postgres driver
 ecosystems (JDBC, psycopg, node-postgres, Npgsql, pgx, ...) work out of the
-box.
+box, with their own default connection settings.
 
-**Status:** early development — no functional build yet. See
-[`execdb_spec.md`](execdb_spec.md) for the full specification and
-[`PLAN.md`](PLAN.md) for implementation progress.
+## Install
+
+Requires Go 1.26+. (Prebuilt binaries via GitHub Releases are planned but
+not published yet — `go install` is the only path for now.)
+
+```sh
+go install github.com/amisonnet8/execdb/cmd/execdb@latest
+```
+
+## Quickstart
+
+```sh
+execdb
+```
+
+```
+ExecDB v...
+No embedded data. Starting with an empty in-memory database.
+Enter ".help" for usage hints.
+execdb> CREATE TABLE t(a INTEGER);
+execdb> INSERT INTO t VALUES (1);
+execdb> .snapshot mydb
+Wrote mydb
+execdb> .exit
+```
+
+`mydb` is now a standalone executable with that table and row baked in:
+
+```sh
+chmod +x mydb   # not needed on Windows
+./mydb
+```
+
+```
+ExecDB v...
+Loaded snapshot: mydb
+Enter ".help" for usage hints.
+execdb> SELECT * FROM t;
+1
+```
+
+Add `-p :5432` to also serve that data over the PostgreSQL wire protocol —
+any Postgres client or driver can connect to it as-is.
+
+## Learn more
+
+- **[`docs/usage/`](docs/usage/)** — CLI flags and REPL command reference
+- **[`docs/examples/`](docs/examples/)** — CI test databases, sharing a bug
+  repro, a mock API server, a SQL sandbox
+- **[`docs/spec/execdb_spec.md`](docs/spec/execdb_spec.md)** — full design
+  and specification
+- **[`PLAN.md`](PLAN.md)** — implementation progress
 
 日本語版は [README_ja.md](README_ja.md) を参照してください。
 

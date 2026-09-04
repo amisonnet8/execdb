@@ -14,12 +14,62 @@ DBエンジンとデータ領域を1つの実行ファイル内に保持する�
 
 外部クライアント（ORM、DBツール、各言語のドライバ）は、PostgreSQL互換
 ワイヤープロトコルのサブセット経由で接続できるため、既存のPostgres用
-ドライバ資産（JDBC、psycopg、node-postgres、Npgsql、pgx等）がそのまま
-利用できます。
+ドライバ資産（JDBC、psycopg、node-postgres、Npgsql、pgx等）が、各ドライバ
+自身のデフォルト接続設定のままそのまま利用できます。
 
-**現在の状況:** 開発初期段階（動作するビルドはまだありません）。詳細な
-仕様は [`execdb_spec.md`](execdb_spec.md)、実装の進捗は
-[`PLAN.md`](PLAN.md) を参照してください。
+## インストール
+
+Go 1.26以降が必要です（GitHub Releasesでのビルド済みバイナリ配布は計画中
+ですが、まだ公開していません。現時点では`go install`のみが導入手段です）。
+
+```sh
+go install github.com/amisonnet8/execdb/cmd/execdb@latest
+```
+
+## クイックスタート
+
+```sh
+execdb
+```
+
+```
+ExecDB v...
+No embedded data. Starting with an empty in-memory database.
+Enter ".help" for usage hints.
+execdb> CREATE TABLE t(a INTEGER);
+execdb> INSERT INTO t VALUES (1);
+execdb> .snapshot mydb
+Wrote mydb
+execdb> .exit
+```
+
+`mydb`は、そのテーブルと行を埋め込んだ、単独で動作する実行ファイルに
+なっています。
+
+```sh
+chmod +x mydb   # Windowsでは不要
+./mydb
+```
+
+```
+ExecDB v...
+Loaded snapshot: mydb
+Enter ".help" for usage hints.
+execdb> SELECT * FROM t;
+1
+```
+
+`-p :5432`を付けて起動すると、そのデータをPostgreSQL互換ワイヤー
+プロトコル経由でも公開できます。既存のPostgresクライアント・ドライバから
+そのまま接続できます。
+
+## 詳しくは
+
+- **[`docs/usage/`](docs/usage/)** — CLIオプション・REPLコマンドのリファレンス
+- **[`docs/examples/`](docs/examples/)** — CIテスト用DB、バグ再現データの共有、
+  モックAPIサーバー、SQLサンドボックス
+- **[`docs/spec/execdb_spec.md`](docs/spec/execdb_spec.md)** — 詳細な設計・仕様書
+- **[`PLAN.md`](PLAN.md)** — 実装の進捗
 
 English version: [README.md](README.md)
 

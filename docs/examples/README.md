@@ -1,0 +1,22 @@
+# Examples
+
+Task-oriented walkthroughs for common ways to use ExecDB. For a plain
+command/flag reference instead, see [`docs/usage/`](../usage/); for the
+full design rationale, see [`docs/spec/execdb_spec.md`](../spec/execdb_spec.md).
+
+- **[CI/CD: an instant test database](ci-testing.md)** — bake a schema +
+  seed data into a binary once, then have every test job just run it.
+- **[Sharing a bug repro as a runnable file](snapshot-sharing.md)** —
+  `.snapshot` a broken data state and hand someone the file instead of a
+  list of setup steps.
+- **[A zero-config mock API / database server](mock-server.md)** — point
+  psql, psycopg, node-postgres, pgx, or JDBC at ExecDB with no install and
+  no ExecDB-specific driver flags, including copy-pasteable connection code
+  for each.
+- **[A zero-setup SQL sandbox](sql-sandbox.md)** — a full SQL engine
+  (views/indexes/triggers/transactions) for learning or experimenting,
+  nothing to install or clean up.
+
+`tests/drivers/` and `tests/pgclient/` in the repository (run by
+`make test`) are the more exhaustive, machine-checked cousins of the
+connection examples here, if you want fuller reference code.
