@@ -121,11 +121,18 @@ func cStringFromBody(body []byte) string {
 const (
 	sqlstateInsufficientPrivilege = "42501"
 	sqlstateInFailedTransaction   = "25P02"
+	sqlstateInvalidPassword       = "28P01" // real PostgreSQL's own code, used as-is (auth.go)
 	sqlstateGeneric               = "XX000"
 )
 
 func writeAuthenticationOk(w io.Writer) error {
 	return writeMessage(w, 'R', func(b *msgBuilder) { b.int32(0) })
+}
+
+// writeAuthenticationCleartextPassword requests a PasswordMessage from the
+// client (spec §8's --user opt-in auth, auth.go's authenticateConnection).
+func writeAuthenticationCleartextPassword(w io.Writer) error {
+	return writeMessage(w, 'R', func(b *msgBuilder) { b.int32(3) })
 }
 
 func writeParameterStatus(w io.Writer, name, value string) error {

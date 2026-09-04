@@ -282,6 +282,31 @@ pass "pgwire TCP: tests/pgclient (pgx) SELECT/NULL/DDL-rejection checks"
 
 stop_server "$pid"
 
+# --- pgwire authentication: -u/--user cleartext password (spec §8, phase 4
+#     Step 4). Correct credentials connect; a wrong password or a
+#     StartupMessage "user" that doesn't match -u are both rejected before
+#     any query can run. ---
+cp "$WORK/snap1" "$WORK/pgauth"
+chmod +x "$WORK/pgauth"
+auth_pid=$(EXECDB_PASSWORD=secret start_server "$WORK/pgauth" -n -p 127.0.0.1:15536 -u alice -q)
+wait_for_tcp 127.0.0.1 15536
+
+auth_out="$(PGPASSWORD=secret psql -h 127.0.0.1 -p 15536 -U alice -d any -tAc 'SELECT 1;')"
+[ "$auth_out" = "1" ] || fail "pgwire auth: correct password did not connect (got: $auth_out)"
+pass "pgwire auth: correct username/password connects"
+
+wrongpw_out="$(PGPASSWORD=wrong psql -h 127.0.0.1 -p 15536 -U alice -d any -c 'SELECT 1;' 2>&1 || true)"
+echo "$wrongpw_out" | grep -q '28P01\|password authentication failed' \
+  || fail "pgwire auth: wrong password was not rejected (got: $wrongpw_out)"
+pass "pgwire auth: wrong password rejected"
+
+wronguser_out="$(PGPASSWORD=secret psql -h 127.0.0.1 -p 15536 -U mallory -d any -c 'SELECT 1;' 2>&1 || true)"
+echo "$wronguser_out" | grep -q '28P01\|password authentication failed' \
+  || fail "pgwire auth: StartupMessage username mismatch was not rejected (got: $wronguser_out)"
+pass "pgwire auth: StartupMessage username mismatch rejected"
+
+stop_server "$auth_pid"
+
 # --- a pgwire session held open across a concurrent REPL .load sees the
 #     newly loaded data (spec §2/§4; phase 2 Step 2's in-place backup and
 #     Step 5's 1-connection-per-Session wiring) ---

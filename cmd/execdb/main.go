@@ -22,9 +22,10 @@ import (
 // version is set at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
-// options holds the parsed startup flags (spec §9). -u/--user is
-// deferred to phase 4 (it needs golang.org/x/term for masked password
-// input) and is intentionally not defined here or shown in --help.
+// options holds the parsed startup flags (spec §9). password is not a
+// flag -- it is resolved by resolveAuth (auth.go) from EXECDB_PASSWORD or
+// an interactive prompt, never accepted on the command line (which would
+// leak it via the process list / shell history).
 type options struct {
 	pgAddr           string
 	socket           string
@@ -33,6 +34,8 @@ type options struct {
 	quiet            bool
 	timestamp        bool
 	snapshotInterval time.Duration
+	user             string
+	password         string
 }
 
 func parseFlags(args []string) (*options, error) {
@@ -53,6 +56,8 @@ func parseFlags(args []string) (*options, error) {
 	fs.BoolVar(&opts.timestamp, "t", false, "")
 	fs.DurationVar(&opts.snapshotInterval, "snapshot-interval", 0, "")
 	fs.DurationVar(&opts.snapshotInterval, "i", 0, "")
+	fs.StringVar(&opts.user, "user", "", "")
+	fs.StringVar(&opts.user, "u", "", "")
 
 	fs.Usage = printUsage
 	if err := fs.Parse(args); err != nil {
@@ -75,6 +80,9 @@ Options:
   -t, --timestamp         Append a timestamp to saved filenames
   -i, --snapshot-interval DURATION
                           Periodically save a snapshot at this interval (e.g. 5m)
+  -u, --user NAME         Require this username + a password for the external I/F
+                          (Zero-Auth if unset). Password: $EXECDB_PASSWORD, else an
+                          interactive prompt in REPL mode (an error in -n mode)
   -h, --help              Show this message
 `, version)
 }
@@ -91,6 +99,11 @@ func main() {
 }
 
 func run(opts *options) {
+	if err := resolveAuth(opts); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+
 	db, err := engine.OpenSelf()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
@@ -137,6 +150,9 @@ func printBanner(db *engine.DB, opts *options) {
 	}
 	if opts.socket != "" {
 		fmt.Fprintf(os.Stderr, "Listening on %s (UNIX Domain Socket)\n", opts.socket)
+	}
+	if opts.user != "" && (opts.pgAddr != "" || opts.socket != "") {
+		fmt.Fprintf(os.Stderr, "External I/F authentication required (user: %s)\n", opts.user)
 	}
 
 	if opts.noRepl {

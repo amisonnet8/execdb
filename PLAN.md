@@ -274,10 +274,12 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
-- 現在のフェーズ: **④PostgreSQL互換ワイヤープロトコル開発、Step 3
-  （`SET`/`SHOW`互換シム）完了**。次はStep 4（`-u`/`--user`認証）から。
-  詳細は下記「フェーズ④のステップ」節・「フェーズ④Step 3（`SET`/`SHOW`
-  互換シム）完了」節を参照。
+- 現在のフェーズ: **④PostgreSQL互換ワイヤープロトコル開発、Step 4
+  （`-u`/`--user`認証）完了**。次はStep 5（Extended Queryプロトコル、
+  最大リスクのステップ）から——**着手前に仕様書§8の採用範囲表を
+  先行更新すること**（`.claude/rules/pgwire.md`のスコープ拡大時の
+  ルール）。詳細は下記「フェーズ④のステップ」節・「フェーズ④Step 4
+  （`-u`/`--user`認証）完了」節を参照。
 - **フェーズ③Step 1（REPL基盤の再構築）完了（2026-09-04）。**
   - `cmd/execdb/access.go`: `splitStatements`から`scanStatements(sql) (complete []string,
     remainder string)`を切り出し（`splitStatements`はremainderが非空白なら末尾へ追加する
@@ -1176,6 +1178,56 @@ Step 1のスパイクで確定した方針（宣言型ベースのアフィニ�
 - `tests/e2e.sh`にpgwire TCP経由の`SET`/`SHOW`往復チェックを追加
 - `make check`・`make race`・`make test`（e2e）とも green を確認済み。
   依存追加なし（`regexp`は標準ライブラリ）
+
+## フェーズ④Step 4（`-u`/`--user`認証）完了（2026-09-04）
+
+仕様書§8「認証（オプトイン、Zero-Authがデフォルト）」・§9の`-u`行をそのまま実装。
+
+- **新規依存: `golang.org/x/term`（BSD-3-Clause）を追加。** `trivy fs
+  --scanners license,vuln .`でCVE 0件・ライセンス互換を確認済み
+  （`modernc.org/libc`もこの機会に`go.mod`上「間接」から「直接」表記へ
+  修正された——`engine/complete.go`が既に直接importしていたのに
+  indirectのまま残っていた既存のズレを`go mod tidy`が正した、副産物）
+- `cmd/execdb/auth.go`（新規）:
+  - `resolveAuth(opts)` / `resolveAuthWith(opts, prompt)`——`--user`指定時の
+    パスワード決定（①`EXECDB_PASSWORD`環境変数 ②REPLモードなら対話入力
+    ③`--no-repl`なら起動中止のエラー）。`prompt`関数を引数として注入する
+    設計とし（`interrupt.go`の`exitFunc`と同じDIパターン）、実端末が無い
+    テスト環境でも全分岐を検証可能にした
+  - `promptPassword()`——`golang.org/x/term`の`ReadPassword`でマスク入力
+  - `authenticateConnection(rw, user, password, startupParams)`——pgwire接続
+    ごとの実プロトコル認証。`user`が空ならZero-Auth
+    （`AuthenticationOk`のみ）、それ以外は
+    `AuthenticationCleartextPassword`→`PasswordMessage`待ち→
+    `StartupMessage`の`user`パラメータとパスワードの両方を照合、
+    不一致はSQLSTATE `28P01`（実PostgreSQLそのままのコード）で拒否
+- `cmd/execdb/pgproto.go`: `writeAuthenticationCleartextPassword`と
+  `sqlstateInvalidPassword = "28P01"`を追加
+- `cmd/execdb/pgwire.go`: `performHandshake`が`StartupMessage`の
+  パラメータを返すよう変更（従来は読み捨てていたが、`user`パラメータの
+  照合に必要になったため）。`sendStartupResponse`を
+  `sendStartupTail`（`ParameterStatus`〜`ReadyForQuery`）へ改名・
+  認証応答部分を分離——`handleConnection`が`performHandshake`→
+  `authenticateConnection`→`sendStartupTail`の順に呼ぶ構成に。
+  `acceptLoop`/`handleConnection`が`user`/`password`を引き回す
+- `cmd/execdb/main.go`: `options`に`user`/`password`
+  （`password`はCLIフラグではなく`resolveAuth`が解決——プロセス一覧や
+  シェル履歴に残らないようにするため）。`-u`/`--user`をパース、
+  `--help`に追記。`run()`冒頭で`resolveAuth`を呼ぶ。バナーに
+  認証有効時の1行を追加
+- 新規テスト`auth_test.go`: `resolveAuthWith`の全分岐
+  （環境変数優先・空文字列環境変数の尊重・サーバーモードでのエラー・
+  REPLモードでのプロンプト呼び出し・プロンプトのエラー伝播）、
+  `authenticateConnection`（Zero-Auth・正しい認証・パスワード不一致・
+  `StartupMessage`の`user`不一致・`PasswordMessage`以外のメッセージ型）
+- **実機確認（`psql`）**: 正しいユーザー名・パスワードで接続、誤った
+  パスワードが拒否、`StartupMessage`の`user`が`--user`と異なる場合も
+  拒否、`--no-repl`かつ`EXECDB_PASSWORD`未設定時に起動が即座にエラー
+  終了することを確認
+- `tests/e2e.sh`に`-u`/`--user`の3チェック
+  （正しい認証情報での接続・誤ったパスワードの拒否・
+  `StartupMessage`の`user`不一致の拒否）を追加
+- `make check`・`make race`・`make test`（e2e）とも green を確認済み
 
 ## フェーズ④への申し送り
 

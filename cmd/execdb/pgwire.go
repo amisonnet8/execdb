@@ -56,39 +56,44 @@ func startPgwire(db *engine.DB, opts *options) (stop func(), err error) {
 	}
 
 	for _, ln := range listeners {
-		go acceptLoop(ln, db)
+		go acceptLoop(ln, db, opts.user, opts.password)
 	}
 	return stop, nil
 }
 
-func acceptLoop(ln net.Listener, db *engine.DB) {
+func acceptLoop(ln net.Listener, db *engine.DB, user, password string) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			return // listener closed
 		}
-		go handleConnection(conn, db)
+		go handleConnection(conn, db, user, password)
 	}
 }
 
 // handleConnection runs one client session: the authentication handshake
-// (spec §8, Zero-Auth only in phase 1), then a loop of Simple Query /
-// Terminate messages (.claude/rules/pgwire.md's protocol subset).
+// (spec §8 -- Zero-Auth by default, or a cleartext password challenge when
+// user != "", auth.go's authenticateConnection), then a loop of Simple
+// Query / Terminate messages (.claude/rules/pgwire.md's protocol subset).
 //
 // One TCP/UDS connection gets exactly one engine.Session (spec §2/§8: the
 // external I/F is an independent client of the live database, with its
 // own real SQL transactions -- see engine/session.go). The Session's
 // context is canceled when this connection ends, including when the
 // client disconnects while a query is still running (watchForDisconnect
-// below); phase 2's scope stops at that (a separate connection's
-// CancelRequest is phase 4, .claude/rules/pgwire.md).
-func handleConnection(conn net.Conn, db *engine.DB) {
+// below); a separate connection's CancelRequest is still phase 4 future
+// work, .claude/rules/pgwire.md.
+func handleConnection(conn net.Conn, db *engine.DB, user, password string) {
 	defer conn.Close()
 
-	if !performHandshake(conn) {
+	startupParams, ok := performHandshake(conn)
+	if !ok {
 		return
 	}
-	if err := sendStartupResponse(conn); err != nil {
+	if !authenticateConnection(conn, user, password, startupParams) {
+		return
+	}
+	if err := sendStartupTail(conn); err != nil {
 		return
 	}
 
@@ -171,35 +176,38 @@ func watchForDisconnect(conn net.Conn, cancel context.CancelFunc) (stop func()) 
 }
 
 // performHandshake consumes SSLRequest/GSSENCRequest -- always answered
-// with 'N' ("not supported, continue unencrypted"; phase 1 is Zero-Auth
-// only, .claude/rules/pgwire.md) -- and then the actual StartupMessage,
-// in whatever order the client sends them. libpq-based clients (psql
+// with 'N' ("not supported, continue unencrypted"; TLS is out of scope,
+// .claude/rules/pgwire.md) -- and then the actual StartupMessage, in
+// whatever order the client sends them. libpq-based clients (psql
 // included) send GSSENCRequest before SSLRequest when built with GSSAPI
 // support; both must get 'N' or the client hangs waiting for a response
-// that never comes. It reports whether the connection is still usable
-// (false for a CancelRequest, which phase 1 does not act on, or an
-// error; the caller just closes either way).
-func performHandshake(conn net.Conn) bool {
+// that never comes. It returns the StartupMessage's parameters (notably
+// "user", which auth.go's authenticateConnection checks against --user)
+// and whether the connection is still usable (false for a CancelRequest,
+// which is still not acted on -- .claude/rules/pgwire.md -- or an error;
+// the caller just closes either way).
+func performHandshake(conn net.Conn) (map[string]string, bool) {
 	for {
 		length, code, err := readStartupHeader(conn)
 		if err != nil {
-			return false
+			return nil, false
 		}
 		switch code {
 		case codeSSLRequest, codeGSSENCRequest:
 			if _, err := conn.Write([]byte{'N'}); err != nil {
-				return false
+				return nil, false
 			}
 		case codeCancelRequest:
 			io.CopyN(io.Discard, conn, int64(length-8))
-			return false
+			return nil, false
 		case protocolVersion3:
-			if _, err := readStartupParams(conn, int(length-8)); err != nil {
-				return false
+			params, err := readStartupParams(conn, int(length-8))
+			if err != nil {
+				return nil, false
 			}
-			return true
+			return params, true
 		default:
-			return false
+			return nil, false
 		}
 	}
 }
@@ -220,10 +228,12 @@ func startupParameterStatus() [][2]string {
 	}
 }
 
-func sendStartupResponse(conn net.Conn) error {
-	if err := writeAuthenticationOk(conn); err != nil {
-		return err
-	}
+// sendStartupTail sends the fixed sequence that follows successful
+// authentication (spec §8's handshake, after auth.go's
+// authenticateConnection has already sent AuthenticationOk): a
+// ParameterStatus for each of startupParameterStatus's values,
+// BackendKeyData, then ReadyForQuery.
+func sendStartupTail(conn net.Conn) error {
 	for _, kv := range startupParameterStatus() {
 		if err := writeParameterStatus(conn, kv[0], kv[1]); err != nil {
 			return err
