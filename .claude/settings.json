@@ -14,5 +14,20 @@
       "Bash(*install*)",
       "Bash(go get*)"
     ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /workspaces/execdb && jq -r '.tool_input.file_path // empty' | { read -r f; case \"$f\" in *.go|*go.mod|*go.sum) make build ;; esac; }",
+            "timeout": 120,
+            "statusMessage": "make build"
+          }
+        ]
+      }
+    ]
   }
 }

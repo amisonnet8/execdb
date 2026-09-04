@@ -227,13 +227,15 @@ db.Close()
 | フィールド | サイズ | 内容 |
 | :--- | :--- | :--- |
 | Magic | 8 bytes | 識別子（例: `"EXECDB01"`） |
-| Version | 4 bytes | フォーマットバージョン |
-| DataOffset | 8 bytes | データブロブの開始オフセット（先頭からの絶対位置） |
-| DataLength | 8 bytes | データブロブの長さ |
+| Version | 4 bytes | フォーマットバージョン（**big-endian**符号なし整数） |
+| DataOffset | 8 bytes | データブロブの開始オフセット（先頭からの絶対位置、**big-endian**） |
+| DataLength | 8 bytes | データブロブの長さ（**big-endian**） |
 | Reserved | 4 bytes | 将来拡張用 |
 
+フッター中のすべての整数フィールドは **big-endian** でエンコードする。
+
 * **読み込み:** `os.Executable()` で自身のパスを取得し、ファイル末尾から32バイトを `Seek` で読むだけでフッターを特定できる。ELF/Mach-Oのセクションヘッダ解析は不要。
-* **書き込み（`.snapshot`実行時、別名保存）:** 初回起動時に自身のエンジン部分（オフセット0〜DataOffset、または末尾フッターが無い場合はファイル全体）をキャッシュしておき、「エンジンバイト＋新データ＋新フッター」を単純に新規ファイルへ書き出すだけで新しいスナップショットを生成できる。差分計算や再リンクは不要。
+* **書き込み（`.snapshot`実行時、別名保存）:** 起動時に自身のエンジン部分のオフセット（0〜DataOffset、または末尾フッターが無い場合はファイル全体サイズ）のみをメモリ上に保持しておき、実際のエンジンバイト列は保存直前に読み直す（`modernc.org/sqlite`込みのバイナリは10〜15MB級になるため、バイト列自体を常駐させない）。保存時は「エンジンバイト＋新データ＋新フッター」を単純に新規ファイルへ書き出すだけで新しいスナップショットを生成できる。差分計算や再リンクは不要。
 * **書き込み（`.overwrite`実行時、自己上書き）:** 同名（自分自身）への直接上書きは、実行中のファイルへの書き込みロックによりOSレベルで拒否される（Linuxの`ETXTBSY`、Windowsの`ERROR_SHARING_VIOLATION`）。これを回避するため、以下の手順を採る（Linux/Windows双方でPoC検証済み）。
   1. 実行中の自分自身を `<path>` → `<path>.execdb_old` に `rename` で退避する（実行中ファイルの名前変更自体はLinux/Windows双方で許可される）
   2. 空いた元のパスへ新しい中身（エンジンバイト＋新データ＋新フッター）を新規書き込みする
@@ -241,14 +243,35 @@ db.Close()
 * **データなしの初回配布バイナリ:** 末尾にマジックバイトが見つからない場合は「エンジンのみ・データ空」として起動する。`go build` した素のバイナリがそのまま実行可能であり、`.snapshot` または `.overwrite` を実行して初めてデータ付きバイナリになる。
 * この方式は自己解凍インストーラやJARファイル（ZIP中央ディレクトリの末尾探索）などで実績のある手法であり、OSローダーの実行にも影響を与えない。
 
-### データブロブのシリアライズ方式（暫定・未確定）
+### データブロブのシリアライズ方式（確定）
 
-「データブロブ」＝インメモリSQLite DBの状態をバイト列化する方法として、**SQLite標準の `Serialize`/`Deserialize` API（`sqlite3_serialize()` / `sqlite3_deserialize()`）を使う方針**を第一候補とする。自前のシリアライズ形式を新規に編み出す必要はなく、`modernc.org/sqlite` は v1.24.0 以降でこのAPIに対応した `(*conn).Serialize` / `(*conn).Deserialize` メソッドを提供している。
+「データブロブ」＝インメモリSQLite DBの状態をバイト列化する方法として、**SQLite標準の `Serialize`/`Deserialize` API（`sqlite3_serialize()` / `sqlite3_deserialize()`）を使う方式を採用する**（2026-09-04、`engine/serialize_spike_test.go` による実測検証済み。フォールバック不要と判断）。自前のシリアライズ形式は編み出さない。
 
-* **書き込み時（`.snapshot` / `.overwrite`）:** `conn.Serialize("main")` でインメモリDBの状態を単一の連続したバイト列として取得し、そのままフッター方式の「データブロブ」として書き込む。
-* **起動時:** バイナリ末尾から読み込んだデータブロブを `conn.Deserialize("main", data)` にそのまま渡すことで、SQLiteが内部的にインメモリDBとして再展開する。
+* **実際のAPI:** `modernc.org/sqlite`（v1.58.0で確認）が提供するのは
+  `func (c *conn) Serialize() ([]byte, error)` と
+  `func (c *conn) Deserialize(buf []byte) error` であり、**スキーマ名を渡す
+  引数は無い**（常にmainスキーマが対象。当初想定していた `Serialize("main")` /
+  `Deserialize("main", data)` という形ではない）。`conn` 型自体はunexportedだが
+  メソッドはexportedなので、`database/sql` の `*sql.Conn` から
+  `conn.Raw(func(driverConn any) error { ... })` を呼び、`driverConn` を
+  ローカルで定義したinterface（`interface{ Serialize() ([]byte, error) }` 等）に
+  型アサーションすることで到達できる。
+* **書き込み時（`.snapshot` / `.overwrite`）:** 上記の方法で取得した `Serialize()` の
+  戻り値を、そのままフッター方式の「データブロブ」として書き込む。
+* **起動時:** バイナリ末尾から読み込んだデータブロブを、同様の方法で取得した
+  `Deserialize(data)` にそのまま渡すことで、SQLiteが内部的にインメモリDBとして
+  再展開する。`modernc.org/sqlite` は内部で
+  `SQLITE_DESERIALIZE_RESIZEABLE|SQLITE_DESERIALIZE_FREEONCLOSE` を指定して
+  `sqlite3_deserialize()` を呼んでいるため、**復元後のDBは通常のDBと同様に
+  拡張可能**（大量INSERTが可能。復元専用の固定サイズDBにはならないことを実測
+  確認済み）。
+* **接続共有モデル:** REPLと外部I/Fが同一のインメモリDBを2つの独立した
+  クライアントとして操作するという§2の要件を満たすため、DSNは
+  `file:<name>?mode=memory&cache=shared` を採用し、`Close()`されるまで
+  保持し続ける「keeper接続」を1つ持つことで、他の全接続が閉じてもDBが
+  消滅しないようにする（`:memory:` は接続ごとに独立したDBになるため、
+  単体では複数クライアントでの共有ができない）。
 * **既知の制約:** SQLite本体の仕様上、`Serialize`/`Deserialize` は非連続なバイト列を扱えず、データベースサイズは合計2GB未満に制限される（SQLiteが一度に2GBを超えるメモリを確保しないため）。ExecDBの主要ユースケース（CI/CDテストDB、モックAPI、学習用サンドボックス等）では通常問題にならない想定だが、大容量データを扱う用途では制約となりうる。
-* **位置づけ:** この方式は実装時点でのAPI仕様・実際の動作を確認しながら最終確定する（＝**現時点では暫定方針であり確定ではない**）。もし何らかの理由で不採用となった場合は、代替として`.dump`相当のSQL文字列化や、独自バイナリ形式でのテーブルダンプ等を検討する。
 
 ---
 

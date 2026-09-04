@@ -76,34 +76,60 @@ Windows/macOSや複数CPUアーキテクチャでの動作確認（GitHub Action
 GitHub Actions 3OSマトリクスがgreen（Windowsでの`.overwrite`含む）／
 `go install`で入れたバイナリでも`.snapshot`/`.overwrite`が機能する。
 
+## Step 1 で確定した事実（`Serialize`/`Deserialize`、2026-09-04実測）
+
+仕様書§7は「暫定・未確定」としていたが、`engine/serialize_spike_test.go`
+（`go test ./engine/ -run TestSpike -v`）で①〜④すべて実測しPASS。
+**Serialize方式を確定**（フォールバック不要）。仕様書の想定と異なっていた点は
+以下の通り（§7へ反映予定）:
+
+- 実シグネチャは `func (c *conn) Serialize() ([]byte, error)` /
+  `func (c *conn) Deserialize(buf []byte) error`。仕様書が書いていた
+  `Serialize("main")`/`Deserialize("main", data)` の**スキーマ引数は存在しない**
+  （常にmainスキーマ固定）。`conn`型はunexportedだが、メソッドはexportedなので
+  `sql.Conn.Raw()` + ローカルinterface（`interface{ Serialize() ([]byte, error) }`等）
+  でのアサーションで到達可能。
+- ライブラリ内部で`Deserialize`時に既に
+  `SQLITE_DESERIALIZE_RESIZEABLE|SQLITE_DESERIALIZE_FREEONCLOSE`
+  を指定済みのため、復元後のDBは拡張可能（2万行追加INSERTで確認）。
+  仕様書が懸念していた「復元専用DBになる」リスクは**該当しない**。
+- 接続共有: `file:execdb?mode=memory&cache=shared` + keeper接続（Close()まで
+  保持する`*sql.Conn`）で、複数の独立した`*sql.Conn`が同一インメモリDBを
+  共有できることを確認。
+- ラウンドトリップ: TABLE/INDEX/VIEW/TRIGGER/AUTOINCREMENT/BLOBすべて
+  Serialize→Deserializeで保持されることを確認。
+
 ## 現在地
 
 *（このセクションは実装が進むにつれて更新すること。「今どのフェーズの、
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
-- 現在のフェーズ: ①ミニマム実装 — Step 1（足場固め＋技術検証）着手前
+- 現在のフェーズ: ①ミニマム実装 — **Step 1完了**、Step 2（`engine`パッケージ）着手前
 - 下準備として以下を作成済み（2026-09-03時点）:
   - `go.mod`（module: `github.com/amisonnet8/execdb`）
   - `LICENSE`（MIT, copyright: amisonnet8）
   - `.gitignore`
   - `README.md` / `README_ja.md`
-  - `engine/doc.go`（パッケージ骨格のみ、ロジック未実装）
-  - `cmd/execdb/main.go`（`func main() {}` のみ、ロジック未実装）
   - `examples/README.md`（用途の説明のみ、中身は未整備）
-  - `go build ./...` / `go vet ./...` で骨格のビルド確認済み
-- フェーズ①のステップ計画（上記「フェーズ①のステップ」節）をレビュー・承認済み。
-- 次のアクション: Step 1（`modernc.org/sqlite`取得、Serialize/Deserialize
-  スパイク検証、Makefile作成、PoCファイル削除）に着手する。
+- Step 1で以下を実施済み（2026-09-04時点）:
+  - `modernc.org/sqlite v1.58.0` を取得、`go.sum`確定。`trivy fs --scanners
+    license,vuln .` でCVE・GPL系混入なしを確認済み
+  - `engine/serialize_spike_test.go` でSerialize/Deserializeの実測検証を実施、
+    全PASS（詳細は上記「Step 1で確定した事実」節）
+  - `Makefile` 作成（build/run/unit/e2e/test/fmt/fmt-check/vet/lint/
+    check-deps/tidy/check/clean/help）。`make check`（fmt-check+vet+
+    check-deps+unit）が通ることを確認済み
+  - ルート直下の `execdb_poc(POC実装).go` を削除（内容は初回コミット
+    `2cef9f8` の履歴に残る）
+  - `.claude/settings.json` に `PostToolUse`(Write|Edit) フックを追加。
+    `.go`/`go.mod`/`go.sum`編集時のみ`make build`を実行（jqでfile_pathを
+    判定）、それ以外はスキップ。実際にEditで発火することを確認済み
+  - `engine/doc.go`・`cmd/execdb/main.go` はまだ骨格のみ（ロジック未実装）
+- 次のアクション: Step 2（`engine`パッケージ本体 — フッターI/O、`DB`型の
+  SQL実行API、`Snapshot`/`SnapshotTo`/`Overwrite`/`Load`/`OpenSelf`）に着手する。
+  仕様書§7・§6・naming.mdへの確定事項反映もStep 2で行う。
 
 ## 保留事項
 
-（Step 1で `Makefile` と自動フックの内容を確定させるため、このセクションは
-Step 1完了後に解消・削除予定。）
-
-- **`Makefile`（`make build`, `make test` 等）の中身**: Step 1で作成する
-  （内容案は上記フェーズ①ステップ節・セッションログ参照: build/run/unit/e2e/
-  test/fmt/fmt-check/vet/lint/check-deps/tidy/check/clean/help）。
-- **`go build` の自動フック**: `make build` を `PostToolUse`(Edit|Write) で
-  実行する方針に決定（2026-09-03）。`.go`以外の編集ではスキップする条件を
-  付けてStep 1で設定する。`make test`（e2e、数十秒かかる）はフック化しない。
+（なし。`Makefile`・自動フックともにStep 1で確定・設定済み。）
