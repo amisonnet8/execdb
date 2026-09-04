@@ -451,9 +451,45 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
   **`memdb` VFSを採用、`sharedcache`は不採用**と確定。詳細は上記
   「フェーズ②Step 1で確定した事実」節を参照。`make check`（`CGO_ENABLED=0`）
   ・`go test -race`（`CGO_ENABLED=1`）ともに green を確認済み。
-- 次のアクション: フェーズ②Step 2（基盤置き換え: DSN・backup経由の
-  `Open`/`Load`・ロック再設計・`Snapshot`/`Overwrite`のシリアライズバリア・
-  typed errors）に着手する。
+- **フェーズ②Step 2（基盤置き換え）完了（2026-09-04）。**
+  - `engine/errors.go`（新規）: `ErrClosed`/`ErrNoData`/`ErrTooLarge`/`ErrBusy`
+    を追加、`ErrNotOverwritable`を`persist.go`から移設
+  - `engine/backup.go`（新規）: `backupper`インターフェース、
+    `backupInto(conn, dstDSN)`（オンラインBackup API経由でconnの内容を
+    生きているDBへ複製）
+  - `engine/serialize.go`: `(db *DB) serialize()`を廃止し、任意のコネクションを
+    受け取る自由関数`serializeConn(conn)`に変更。`loadBlobInto(blob, dstDSN)`
+    を新設（捨てコネクションへ`Deserialize`→`backupInto`の合成）。
+    `Open`/`OpenSelf`/`Load`は全てこれを経由するよう統一
+  - `engine/engine.go`: `DB`に`dsn string`・`closed bool`フィールドを追加。
+    `newSharedCacheDB`を`newLiveDB`へ改名し、DSNを`memdb` VFS
+    （`file:/execdbN?vfs=memdb&_busy_timeout=5000`）へ変更。
+    **`Exec`/`Query`/`QueryRow`を`db.keeper`経由から`db.sdb`（コネクション
+    プール）経由へ変更**——Step 1でbackup APIによる伝播が確認できたため、
+    フェーズ①の「全SQL実行をkeeperに集約」という回避策が不要になった。
+    `keeper`は生きているmemdbストアを維持するためだけに保持し、SQLを
+    実行しないことを明記。`Close()`を`closed`フラグで冪等化
+  - `engine/persist.go`: `image()`/`Overwrite()`が新設の
+    `(db *DB) serializeBarrier()`（専用コネクションで`BEGIN IMMEDIATE`→
+    `Serialize()`→`ROLLBACK`——他セッションの書き込み中は`busy_timeout`の
+    範囲で待ってから`ErrBusy`）を経由するよう変更。空blobは`ErrTooLarge`で
+    ガード。**`Load()`を`*sql.DB`/`keeper`の差し替えから、生きているDBへの
+    in-place backupへ変更**——旧keeperの`Close()`が実行中の`*sql.Rows`を
+    破断させるバグが解消し、`.load`中も既存セッションが生き続けるように
+    なった（フェーズ①の申し送り事項を解決）。`Load`成功後に`db.info`を
+    更新（`sourcePath`/`engineSize`は仕様§4通り不変のまま、既存バグ修正）
+  - `engine/session_spike_test.go`は削除（フェーズ①の
+    `serialize_spike_test.go`と同じ前例に倣い、本実装と回帰テストへ
+    置き換え）。既存テストを新設計に追従させつつ、新規テスト
+    （`TestOpenIsVisibleToPooledConnections`/`TestLoadKeepsExistingSessionsUsable`/
+    `TestInfoReflectsLoadedFile`/`TestCloseIsIdempotent`/
+    `TestUseAfterCloseReturnsErrClosed`/`TestSnapshotToRoundTrip`/
+    `TestOverwriteSelfLeavesOriginalIntactOnFailure`）を追加。全24テストPASS
+  - `make check`（`CGO_ENABLED=0`）・`go test -race ./...`（`CGO_ENABLED=1`）・
+    `make test`（`examples/e2e.sh`——REPL・`.snapshot`・`.load`・`.overwrite`・
+    pgwire TCP/UDS・`go install`まで全チェック）とも green を確認済み。
+    依存追加なし（`go.mod`/`go.sum`変更なし、trivy不要）
+- 次のアクション: フェーズ②Step 3（`Session`とcontext API）に着手する。
 
 ## 保留事項
 

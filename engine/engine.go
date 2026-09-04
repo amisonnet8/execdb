@@ -11,8 +11,16 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// dbSeq gives each in-memory database a unique name in the shared-cache
-// namespace (spec §7: "file:<name>?mode=memory&cache=shared"), so
+// defaultBusyTimeoutMS bounds how long any connection to the live
+// database waits behind another connection's lock before giving up with
+// SQLITE_BUSY (spec §2: rely on SQLite's own concurrency machinery rather
+// than reimplementing it). See .claude/rules/sqlite-quirks.md for why
+// this matters specifically for the memdb VFS.
+const defaultBusyTimeoutMS = 5000
+
+// dbSeq gives each in-memory database a unique name in the memdb VFS's
+// shared-store namespace (a name starting with "/" is shared globally by
+// name within the process -- see .claude/rules/sqlite-quirks.md), so
 // multiple DBs in the same process (e.g. in tests) never collide.
 var dbSeq int64
 
@@ -24,38 +32,51 @@ var dbSeq int64
 type DB struct {
 	mu     sync.RWMutex
 	sdb    *sql.DB
-	keeper *sql.Conn // holds the shared-cache database alive (spec §7)
+	keeper *sql.Conn // keeps the live memdb store alive; never used to run SQL (see loadBlobInto)
+	dsn    string    // this DB's live memdb DSN -- the backup destination for Open/Load
+	closed bool
 
 	sourcePath string // "" if this DB was not opened from a file (New())
 	engineSize int64  // bytes to carry forward as Snapshot's engine prefix
 	info       Info
 }
 
-// newSharedCacheDB opens a fresh shared-cache in-memory database and
-// returns a keeper connection that must stay open for the database's
-// entire lifetime, or the last connection to close would free it.
-func newSharedCacheDB() (*sql.DB, *sql.Conn, error) {
+// newLiveDB opens a fresh memdb-backed live database and returns a
+// keeper connection that must stay open for the database's entire
+// lifetime (a store with no connections left open can be freed), plus
+// the DSN callers need to reach the same store -- e.g. as a Backup
+// destination (backup.go) or from DB.sdb's own connection pool.
+//
+// engine uses SQLite's memdb VFS (SHARED/RESERVED/EXCLUSIVE locking, the
+// same family a normal file-backed database uses) rather than the
+// mode=memory&cache=shared DSN phase 1 used: shared-cache's lock-conflict
+// error (SQLITE_LOCKED_SHAREDCACHE) is retried via a wait that ignores
+// both context.Context and busy_timeout and can hang forever. memdb's
+// conflicts go through SQLite's normal busy-handler and honor
+// busy_timeout, which bounds every wait (.claude/rules/sqlite-quirks.md,
+// PLAN.md "フェーズ②Step 1で確定した事実").
+func newLiveDB() (sdb *sql.DB, keeper *sql.Conn, dsn string, err error) {
 	name := fmt.Sprintf("execdb%d", atomic.AddInt64(&dbSeq, 1))
-	dsn := "file:" + name + "?mode=memory&cache=shared"
-	sdb, err := sql.Open("sqlite", dsn)
+	dsn = fmt.Sprintf("file:/%s?vfs=memdb&_busy_timeout=%d", name, defaultBusyTimeoutMS)
+	sdb, err = sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
-	keeper, err := sdb.Conn(context.Background())
+	keeper, err = sdb.Conn(context.Background())
 	if err != nil {
 		sdb.Close()
-		return nil, nil, err
+		return nil, nil, "", err
 	}
-	return sdb, keeper, nil
+	return sdb, keeper, dsn, nil
 }
 
 // New creates an empty in-memory database with no backing file.
 func New() (*DB, error) {
-	sdb, keeper, err := newSharedCacheDB()
+	sdb, keeper, dsn, err := newLiveDB()
 	if err != nil {
 		return nil, err
 	}
-	return &DB{sdb: sdb, keeper: keeper}, nil
+	return &DB{sdb: sdb, keeper: keeper, dsn: dsn}, nil
 }
 
 // Open loads the data embedded in path, which may be either a plain
@@ -80,7 +101,7 @@ func Open(path string) (*DB, error) {
 	db.info = info
 
 	if blob != nil {
-		if err := deserializeInto(db.keeper, blob); err != nil {
+		if err := loadBlobInto(blob, db.dsn); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("engine: %s: %w", path, err)
 		}
@@ -146,37 +167,66 @@ func (db *DB) Info() Info {
 // caller using engine as a library is trusted (spec §6); access control
 // by caller (REPL vs. external I/F) is cmd/execdb's responsibility.
 //
-// Exec, Query and QueryRow all run on the keeper connection rather than a
-// pooled connection from db.sdb. modernc.org/sqlite's Deserialize (spec
-// §7) only affects the connection it is called on -- even a connection
-// opened afterward on the same shared-cache DSN does not see its result
-// (confirmed in engine/serialize_test.go) -- so every read of a DB that
-// may have been populated via Open/OpenSelf/Load must go through the same
-// connection that Deserialize ran on.
+// Exec, Query and QueryRow each run on a connection borrowed from the
+// pool (db.sdb), used once and returned -- they are one-shot operations,
+// not a session. A statement like BEGIN executed this way appears to
+// succeed, but the transaction it opens is invisible to every later call:
+// database/sql's ResetSession does not roll back an open transaction
+// before returning a connection to the pool, so the next unrelated
+// caller could silently inherit it (.claude/rules/sqlite-quirks.md).
+// Callers that need BEGIN/COMMIT/ROLLACK to mean anything must hold a
+// single dedicated connection across those statements (DB.Session, added
+// in a later step).
 func (db *DB) Exec(query string, args ...any) (sql.Result, error) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-	return db.keeper.ExecContext(context.Background(), query, args...)
+	sdb, err := db.pooled()
+	if err != nil {
+		return nil, err
+	}
+	return sdb.ExecContext(context.Background(), query, args...)
 }
 
 func (db *DB) Query(query string, args ...any) (*sql.Rows, error) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-	return db.keeper.QueryContext(context.Background(), query, args...)
+	sdb, err := db.pooled()
+	if err != nil {
+		return nil, err
+	}
+	return sdb.QueryContext(context.Background(), query, args...)
 }
 
+// QueryRow behaves like Exec/Query, with one difference after Close: it
+// cannot return ErrClosed directly, because *sql.Row has no way to carry
+// a caller-supplied error before Scan is called. A QueryRow call made
+// after Close instead surfaces database/sql's own "sql: database is
+// closed" once Scan is called on the result.
 func (db *DB) QueryRow(query string, args ...any) *sql.Row {
 	db.mu.RLock()
+	sdb := db.sdb
+	db.mu.RUnlock()
+	return sdb.QueryRowContext(context.Background(), query, args...)
+}
+
+// pooled returns db.sdb for a one-shot call, or ErrClosed if db has
+// already been closed.
+func (db *DB) pooled() (*sql.DB, error) {
+	db.mu.RLock()
 	defer db.mu.RUnlock()
-	return db.keeper.QueryRowContext(context.Background(), query, args...)
+	if db.closed {
+		return nil, ErrClosed
+	}
+	return db.sdb, nil
 }
 
 // Close releases the database's resources. It does not persist anything;
 // callers that want to keep the data must call Snapshot or Overwrite
-// first (spec §4: persistence is explicit only).
+// first (spec §4: persistence is explicit only). Close is idempotent: a
+// second call is a no-op that returns nil.
 func (db *DB) Close() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	if db.closed {
+		return nil
+	}
+	db.closed = true
 	if db.keeper != nil {
 		db.keeper.Close()
 	}

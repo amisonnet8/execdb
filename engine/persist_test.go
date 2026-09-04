@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,7 +26,7 @@ func serializedFixture(t *testing.T, ddl string) []byte {
 	if _, err := db.Exec(ddl); err != nil {
 		t.Fatal(err)
 	}
-	blob, err := db.serialize()
+	blob, err := db.serializeBarrier()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,6 +190,98 @@ func TestLoadReplacesDataNotMerge(t *testing.T) {
 	}
 }
 
+// TestLoadKeepsExistingSessionsUsable locks in the point of Load's Step 2
+// redesign: it backs the new data up into the live database in place,
+// instead of swapping in a new keeper connection and closing the old one
+// out from under whatever else was using it. A connection obtained
+// before Load runs -- standing in for an in-flight pgwire/REPL session,
+// which Step 5 will wrap in engine.Session -- must keep working
+// afterward and see the newly loaded data.
+func TestLoadKeepsExistingSessionsUsable(t *testing.T) {
+	dbA, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbA.Close()
+	if _, err := dbA.Exec("CREATE TABLE original(a INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+
+	preLoadConn, err := dbA.sdb.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer preLoadConn.Close()
+
+	dbB, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbB.Close()
+	if _, err := dbB.Exec("CREATE TABLE loaded(b TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbB.Exec("INSERT INTO loaded VALUES ('z')"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "b.execdb")
+	if err := dbB.Snapshot(path); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := dbA.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	var s string
+	if err := preLoadConn.QueryRowContext(context.Background(), "SELECT b FROM loaded").Scan(&s); err != nil {
+		t.Fatalf("a connection opened before Load could not see the loaded data: %v", err)
+	}
+	if s != "z" {
+		t.Errorf("got %q, want %q", s, "z")
+	}
+}
+
+// TestInfoReflectsLoadedFile locks in a Step 2 bug fix: DB.info used to
+// be left untouched by Load, so Info() kept reporting whatever file (or
+// nothing) this DB was originally opened from.
+func TestInfoReflectsLoadedFile(t *testing.T) {
+	dbA, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbA.Close()
+
+	dbB, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbB.Close()
+	if _, err := dbB.Exec("CREATE TABLE t(a INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "b.execdb")
+	if err := dbB.Snapshot(path); err != nil {
+		t.Fatal(err)
+	}
+
+	if before := dbA.Info(); before.HasData {
+		t.Fatal("expected a fresh New() DB's Info().HasData to be false before Load")
+	}
+
+	if err := dbA.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	after := dbA.Info()
+	if !after.HasData {
+		t.Error("expected Info().HasData=true after a successful Load")
+	}
+	if after.Path != path {
+		t.Errorf("Info().Path = %q, want %q", after.Path, path)
+	}
+}
+
 func TestLoadOnFileWithoutDataIsError(t *testing.T) {
 	db, err := New()
 	if err != nil {
@@ -249,6 +343,89 @@ func TestLoadDoesNotChangeEnginePrefix(t *testing.T) {
 	}
 	if string(gotEngine) != string(selfEngineBytes) {
 		t.Errorf("engine prefix = %q, want the original self engine bytes %q", gotEngine, selfEngineBytes)
+	}
+}
+
+// TestSnapshotToRoundTrip covers SnapshotTo, which previously had no test
+// of its own despite being exported.
+func TestSnapshotToRoundTrip(t *testing.T) {
+	db, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE t(a INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO t VALUES (1), (2)"); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := db.SnapshotTo(&buf); err != nil {
+		t.Fatalf("SnapshotTo: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "out.execdb")
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer reopened.Close()
+
+	var n int
+	if err := reopened.QueryRow("SELECT count(*) FROM t").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("count = %d, want 2", n)
+	}
+}
+
+// TestOverwriteSelfLeavesOriginalIntactOnFailure checks the safety
+// property overwriteSelf's rename-then-write dance exists for: if it
+// cannot complete, the file at selfPath is left with either its original
+// content or nothing changes at all -- never neither the old nor the new
+// content. It forces failure by making the containing directory
+// read-only (blocking the initial rename-aside step, since both that and
+// the later write need directory-write permission -- Go's os package has
+// no portable way to fail only the second step without touching the
+// first), which is a stronger check than exercising the write-failure
+// rollback path specifically, but covers the same overall invariant.
+func TestOverwriteSelfLeavesOriginalIntactOnFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission bits don't block writes the same way on Windows")
+	}
+
+	roDir := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(roDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(roDir, "target")
+	original := []byte("original content")
+	if err := os.WriteFile(path, original, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Chmod(roDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(roDir, 0o755) // let t.TempDir()'s cleanup remove it
+
+	if err := overwriteSelf(path, []byte("ENGINE"), []byte("DATA")); err == nil {
+		t.Fatal("expected overwriteSelf to fail against a read-only directory")
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("original file is gone after a failed overwriteSelf: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Errorf("original content was modified despite overwriteSelf failing: got %q", got)
 	}
 }
 

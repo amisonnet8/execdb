@@ -1,7 +1,7 @@
 package engine
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -40,15 +40,17 @@ func (db *DB) SnapshotTo(w io.Writer) error {
 	return writeImage(w, engineBytes, blob)
 }
 
-// image serializes the current DB state and re-reads this DB's engine
-// prefix from its source file, if any.
+// image serializes the current DB state (through the serialization
+// barrier, so a concurrent writer elsewhere cannot produce an
+// inconsistent snapshot) and re-reads this DB's engine prefix from its
+// source file, if any.
 func (db *DB) image() (engineBytes, data []byte, err error) {
 	db.mu.RLock()
 	sourcePath := db.sourcePath
 	engineSize := db.engineSize
 	db.mu.RUnlock()
 
-	data, err = db.serialize()
+	data, err = db.serializeBarrier()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -57,6 +59,47 @@ func (db *DB) image() (engineBytes, data []byte, err error) {
 		return nil, nil, err
 	}
 	return engineBytes, data, nil
+}
+
+// serializeBarrier takes a consistent snapshot of the live database.
+// Serialize() itself is not transaction-aware -- called bare, it can
+// return a torn snapshot that includes another session's uncommitted
+// write (.claude/rules/sqlite-quirks.md) -- so this wraps it in a BEGIN
+// IMMEDIATE barrier on a dedicated connection. Starting that transaction
+// blocks (up to the live database's busy_timeout) until no other session
+// holds a conflicting write lock, so once it succeeds, Serialize() cannot
+// observe a write in progress. The barrier transaction itself never
+// writes anything; it only exists to hold the write lock, so it always
+// ends in ROLLBACK.
+func (db *DB) serializeBarrier() ([]byte, error) {
+	sdb, err := db.pooled()
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err := sdb.Conn(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrBusy, err)
+	}
+	defer conn.ExecContext(context.Background(), "ROLLBACK")
+
+	blob, err := serializeConn(conn)
+	if err != nil {
+		return nil, err
+	}
+	if len(blob) == 0 {
+		// modernc.org/sqlite's Serialize can return (nil, nil) rather than
+		// an error when malloc fails for a very large database
+		// (.claude/rules/sqlite-quirks.md) -- treat an empty result as a
+		// failure rather than silently writing a zero-length data blob.
+		return nil, ErrTooLarge
+	}
+	return blob, nil
 }
 
 // readEnginePrefix re-reads the first engineSize bytes of sourcePath
@@ -122,12 +165,6 @@ func writeImageAtomic(path string, engineBytes, data []byte, mode os.FileMode) e
 // write (spec §7).
 const oldSuffix = ".execdb_old"
 
-// ErrNotOverwritable is returned by Overwrite when the running process's
-// own executable path looks like a `go run` temporary binary: `go run`
-// deletes it as soon as the process exits, which would make Overwrite a
-// no-op that looks like it succeeded.
-var ErrNotOverwritable = errors.New("engine: running executable is not overwritable (looks like a `go run` temporary binary)")
-
 // Overwrite replaces the running process's own executable (os.Executable())
 // in place with its own engine bytes followed by the current DB state
 // (spec §6, §7; REPL ".overwrite"). It always targets the current
@@ -156,7 +193,7 @@ func (db *DB) Overwrite() error {
 		engineSize = stat.Size()
 	}
 
-	data, err := db.serialize()
+	data, err := db.serializeBarrier()
 	if err != nil {
 		return err
 	}
@@ -231,31 +268,41 @@ func cleanupOrphanedOldSelf(selfPath string) {
 // データのみを読み込む"). Load does not warn about a footer
 // format-version mismatch; call Inspect first if the caller wants that
 // (spec §4).
+//
+// Load replaces the live database's content in place (via SQLite's
+// online Backup API, see loadBlobInto) rather than swapping in a new
+// keeper connection. This means any connection obtained before Load ran
+// -- including a Session from a still-open pgwire/REPL client -- keeps
+// working afterward and sees the newly loaded data, instead of failing
+// mid-response because its underlying connection was closed out from
+// under it.
 func (db *DB) Load(path string) error {
-	_, _, blob, err := loadFromFile(path)
+	info, _, blob, err := loadFromFile(path)
 	if err != nil {
 		return err
 	}
 	if blob == nil {
-		return fmt.Errorf("engine: %s: no ExecDB data found", path)
+		return fmt.Errorf("engine: %s: %w", path, ErrNoData)
 	}
 
-	newSdb, newKeeper, err := newSharedCacheDB()
-	if err != nil {
-		return err
+	db.mu.RLock()
+	dsn := db.dsn
+	closed := db.closed
+	db.mu.RUnlock()
+	if closed {
+		return ErrClosed
 	}
-	if err := deserializeInto(newKeeper, blob); err != nil {
-		newKeeper.Close()
-		newSdb.Close()
+
+	if err := loadBlobInto(blob, dsn); err != nil {
 		return fmt.Errorf("engine: %s: %w", path, err)
 	}
 
+	// info reflects which file this DB's data came from and is updated on
+	// every successful Load. sourcePath/engineSize are deliberately left
+	// untouched: they track the engine bytes a later Snapshot should
+	// carry forward, which Load must never change (spec §4).
 	db.mu.Lock()
-	oldSdb, oldKeeper := db.sdb, db.keeper
-	db.sdb, db.keeper = newSdb, newKeeper
+	db.info = info
 	db.mu.Unlock()
-
-	oldKeeper.Close()
-	oldSdb.Close()
 	return nil
 }

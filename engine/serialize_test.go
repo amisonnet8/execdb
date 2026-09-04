@@ -35,12 +35,12 @@ func TestSerializeDeserializeRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	blob, err := db.serialize()
+	blob, err := db.serializeBarrier()
 	if err != nil {
-		t.Fatalf("serialize: %v", err)
+		t.Fatalf("serializeBarrier: %v", err)
 	}
 	if len(blob) == 0 {
-		t.Fatal("serialize returned an empty blob")
+		t.Fatal("serializeBarrier returned an empty blob")
 	}
 
 	restored, err := New()
@@ -48,8 +48,13 @@ func TestSerializeDeserializeRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restored.Close()
-	if err := deserializeInto(restored.keeper, blob); err != nil {
-		t.Fatalf("deserializeInto: %v", err)
+	// Goes through the same loadBlobInto path Open/Load use in production,
+	// not a bare deserializeInto(restored.keeper, ...): restored.QueryRow
+	// below reads through the connection pool (db.sdb), and Deserialize's
+	// result is invisible to any connection but the one it ran on
+	// (TestDeserializeDoesNotPropagateToOtherConnections below).
+	if err := loadBlobInto(blob, restored.dsn); err != nil {
+		t.Fatalf("loadBlobInto: %v", err)
 	}
 
 	var name string
@@ -79,14 +84,18 @@ func TestSerializeDeserializeRoundTrip(t *testing.T) {
 }
 
 // TestDeserializeDoesNotPropagateToOtherConnections documents a real limit
-// of modernc.org/sqlite's Deserialize discovered while implementing
-// engine.DB: unlike plain SQL statements (see
-// TestSharedCacheDSNIsVisibleToOtherConnections in engine_test.go),
+// of modernc.org/sqlite's Deserialize, and is why loadBlobInto exists
+// (serialize.go) instead of deserializing directly into DB's live
+// database: unlike plain SQL statements (see
+// TestPooledConnectionsShareTheLiveDatabase in engine_test.go),
 // Deserialize only affects the exact connection it is called on -- not
-// even a connection opened afterward on the same shared-cache DSN sees
-// its result. This is why DB.Exec/Query/QueryRow route through the
-// keeper connection instead of db.sdb's pool, and why Load builds an
-// entirely new keeper rather than deserializing into the existing one.
+// even a connection opened afterward on the same DSN sees its result.
+// Internally, Deserialize reopens its target schema as an anonymous
+// (unshared) memdb store, which is why no choice of DSN fixes this
+// (.claude/rules/sqlite-quirks.md). loadBlobInto instead deserializes
+// into a throwaway connection and then uses SQLite's online Backup API
+// (backup.go) to copy that into the live database through the normal
+// btree/pager machinery, which every connection on it can see.
 func TestDeserializeDoesNotPropagateToOtherConnections(t *testing.T) {
 	src, err := New()
 	if err != nil {
@@ -99,12 +108,12 @@ func TestDeserializeDoesNotPropagateToOtherConnections(t *testing.T) {
 	if _, err := src.Exec("INSERT INTO t VALUES (1)"); err != nil {
 		t.Fatal(err)
 	}
-	blob, err := src.serialize()
+	blob, err := src.serializeBarrier()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	sdb, keeper, err := newSharedCacheDB()
+	sdb, keeper, _, err := newLiveDB()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,6 +137,6 @@ func TestDeserializeDoesNotPropagateToOtherConnections(t *testing.T) {
 	if err := other.QueryRowContext(context.Background(), "SELECT count(*) FROM t").Scan(&n); err == nil {
 		t.Error("expected a connection opened after Deserialize to NOT see its result " +
 			"(if this now passes, modernc.org/sqlite's behavior has changed and the " +
-			"Exec/Query/QueryRow keeper-routing workaround may no longer be necessary)")
+			"backup-based loadBlobInto workaround in serialize.go may no longer be necessary)")
 	}
 }
