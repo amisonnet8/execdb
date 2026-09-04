@@ -66,9 +66,7 @@ Usage: execdb [options]
 
 Options:
   -p, --pg-addr ADDR      PostgreSQL wire protocol TCP listen address (e.g. :5432)
-                          (not yet implemented)
   -s, --socket PATH       PostgreSQL wire protocol UNIX domain socket path
-                          (not yet implemented)
   -o, --snapshot-as NAME  Default filename for .snapshot / server-mode auto-save
   -n, --no-repl           Run in server mode without starting the REPL
   -q, --quiet             Suppress the startup banner
@@ -89,17 +87,19 @@ func main() {
 }
 
 func run(opts *options) {
-	if opts.pgAddr != "" || opts.socket != "" {
-		fmt.Fprintln(os.Stderr, "Error: --pg-addr/--socket are not implemented yet (coming in a later development phase).")
-		os.Exit(1)
-	}
-
 	db, err := engine.OpenSelf()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
 	defer db.Close()
+
+	stopPgwire, err := startPgwire(db, opts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+	defer stopPgwire()
 
 	printBanner(db, opts)
 
@@ -120,6 +120,13 @@ func printBanner(db *engine.DB, opts *options) {
 		fmt.Fprintf(os.Stderr, "Loaded snapshot: %s\n", filepath.Base(info.Path))
 	} else {
 		fmt.Fprintln(os.Stderr, "No embedded data. Starting with an empty in-memory database.")
+	}
+
+	if opts.pgAddr != "" {
+		fmt.Fprintf(os.Stderr, "Listening on %s (PostgreSQL wire protocol)\n", opts.pgAddr)
+	}
+	if opts.socket != "" {
+		fmt.Fprintf(os.Stderr, "Listening on %s (UNIX Domain Socket)\n", opts.socket)
 	}
 
 	if opts.noRepl {

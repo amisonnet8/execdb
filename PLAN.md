@@ -136,8 +136,8 @@ DSN（`file:execdb?mode=memory&cache=shared`）を使っていても、`Deserial
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
-- 現在のフェーズ: ①ミニマム実装 — **Step 3完了**、Step 4（pgwire＋
-  アクセス制御）着手前
+- 現在のフェーズ: ①ミニマム実装 — **Step 4完了**、Step 5（E2E自動化・
+  他言語ドライバ確認・CI）着手前
 - 下準備として以下を作成済み（2026-09-03時点）:
   - `go.mod`（module: `github.com/amisonnet8/execdb`）
   - `LICENSE`（MIT, copyright: amisonnet8）
@@ -206,10 +206,41 @@ DSN（`file:execdb?mode=memory&cache=shared`）を使っていても、`Deserial
     `-p`/`-s`未実装ガード、`-n`サーバーモード＋SIGTERM自動保存
     （`-o`で指定したファイル名で保存されることも確認）——**すべて成功**
   - `make check`・`go vet`とも問題なし
-- 次のアクション: Step 4（`cmd/execdb/pgwire.go`・`pgproto.go`・`access.go`
-  — TCP/UNIX Domain Socketのpgwire自前実装、DDL/ATTACH/PRAGMA/VACUUM等の
-  外部I/F拒否）に着手する。`-p`/`-s`の「未実装エラー」ガードを実際の
-  リスナー起動に置き換える。
+- Step 4で以下を実施済み（2026-09-04時点）:
+  - `cmd/execdb/access.go`（`splitStatements`——文字列リテラル・識別子・
+    行/ブロックコメントを考慮した`;`分割、`firstKeyword`、
+    `checkExternalAccess`——DDL＋ATTACH/DETACH/PRAGMA/VACUUM/REINDEXを
+    拒否、複文の1つでも拒否対象なら全体を拒否）＋`access_test.go`
+  - `cmd/execdb/pgproto.go`（メッセージのエンコード/デコード。前置リクエスト
+    ヘッダ読み取り、`StartupMessage`パラメータ解析、フロントエンドメッセージ
+    読み取り、`AuthenticationOk`/`ParameterStatus`/`BackendKeyData`/
+    `ReadyForQuery`/`RowDescription`/`DataRow`/`CommandComplete`/
+    `ErrorResponse`の送信。全列OID 25(text)/format 0固定）＋
+    `pgproto_test.go`（バイト列フィクスチャ）
+  - `cmd/execdb/pgwire.go`（`startPgwire`——TCP/UDS両対応、UDSは起動時に
+    stale socket除去・0600権限・終了時削除。`performHandshake`——
+    SSLRequest/GSSENCRequestへの`'N'`応答をループ処理、CancelRequestは
+    読み捨てて切断。Simple Queryの複文を`splitStatements`で1文ずつ実行し、
+    1文ごとに完全なレスポンスサイクルを送る——real PostgreSQLと同じ挙動）
+  - `main.go`のバナー・`run()`を更新: `-p`/`-s`の「未実装」ガードを実際の
+    `startPgwire`呼び出しに置き換え、"Listening on..."行を追加
+  - **実機確認（すべて実際の`psql`で実施、成功）**: TCP経由`SELECT 1`、
+    GSSENCRequest→SSLRequestの2段階ハンドシェイク処理、`CREATE TABLE`/
+    `ATTACH`/`PRAGMA`が42501で拒否、`SELECT 1; DROP TABLE t`の複文
+    バイパスが拒否、`BEGIN`/`COMMIT`のコマンドタグ、**REPLでCREATE/INSERT
+    したデータをpsql側のSELECTで読めて、psql側のINSERTをREPL側のSELECTで
+    読める**（REPL・pgwireが同一DBを共有するアーキテクチャの実証）、UNIX
+    Domain Socket（libpqの`.s.PGSQL.<port>`命名規則で接続確認）、TCP+UDS
+    同時待受、`kill -9`後の再起動でのstale socket自動除去
+  - `make check`・`go vet`とも問題なし
+  - pgwire.mdへ実装知見を追記: `psql`のGSSENCRequest→SSLRequest送信順序、
+    UDSのlibpq命名規則制約、複数クライアント同時トランザクションの真の
+    分離は未対応（`engine.DB`が単一keeperコネクション経由のため）という
+    既知の制約
+- 次のアクション: Step 5（`examples/e2e.sh`によるE2E自動化、
+  `examples/pgclient`でのpgx接続確認、`go install`でのフッター方式動作
+  確認、GitHub Actions 3OSマトリクス、仕様書・ルールファイルへの最終反映）
+  に着手する。
 
 ## 保留事項
 
