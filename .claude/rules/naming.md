@@ -24,6 +24,7 @@ ExecDB では、REPLコマンド・CLI起動オプション・`engine`パッケ�
 | `.dump` | ─ | ─ |
 | `.import` | ─ | ─ |
 | ─（自動実行、対応するREPLコマンドなし） | `-i` / `--snapshot-interval` | `db.Snapshot(path string)`（`.snapshot`と共用） |
+| ─（REPLには認証をかけない。外部I/Fのみ） | `-u` / `--user` | ─（`engine`は認証の概念を持たない。`cmd/execdb/auth.go`で完結） |
 
 `engine.OpenSelf()` / `engine.Open()` / `engine.New()` / `db.Session()` /
 `db.LoadFrom()` はDBの生成・ロード・接続取得方法であり、ユーザー操作に直接
@@ -38,6 +39,14 @@ ExecDB では、REPLコマンド・CLI起動オプション・`engine`パッケ�
 `-i`/`--snapshot-interval`は対応するREPLコマンドを持たない代わりに、
 `.snapshot`と同じ`db.Snapshot(path string)`を定期的に呼ぶだけであり、
 専用の`engine` APIを新設していない。
+
+`-u`/`--user`（フェーズ④Step 4）はREPLコマンド・`engine` APIのどちらとも
+対応しない、この表で唯一「CLIオプションだけが単独で存在する」行である。
+認証は外部I/F（pgwire）の接続時にのみかかり、REPL自体には認証をかけない
+という設計（`execdb_spec.md`§8）のため対応するREPLコマンドが無く、
+「ユーザー」という概念自体を`engine`が持たない（`db.Session(ctx)`はどの
+クライアントにも区別なく専有コネクションを返すだけ）ため対応する`engine`
+APIも無い。認証ロジックは`cmd/execdb/auth.go`に閉じている。
 
 新規追加時も、この3レイヤーの名前が対応するように設計すること。対応関係が
 崩れる変更をする場合は、必ず3箇所（REPL・CLI・`engine`）を同時に確認・修正する。

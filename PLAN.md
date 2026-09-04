@@ -274,13 +274,13 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
-- 現在のフェーズ: **④PostgreSQL互換ワイヤープロトコル開発、Step 7
-  （他言語ドライバ検証＋CI）完了**。次はStep 8（仕様書・ルール・PLAN・
-  devcontainer統合、フェーズ④最後のステップ）から。詳細は下記
-  「フェーズ④のステップ」節・「フェーズ④Step 7（他言語ドライバ検証＋CI）
-  完了」節を参照（pgJDBCのデフォルト設定がBindパラメータをバイナリ形式で
-  送ってくることを実機確認で発見し、`Parse`メッセージ自身が申告する
-  パラメータ型OIDを手がかりにデコードする設計へ拡張した経緯を含む）。
+- **フェーズ④（PostgreSQL互換ワイヤープロトコル開発）完了、
+  かつ当初計画していた4フェーズ（①〜④）すべてが完了（2026-09-04）。**
+  詳細は下記「フェーズ④（PostgreSQL互換ワイヤープロトコル開発）完了」節・
+  「フェーズ④Step 8（仕様書・ルール・PLAN・devcontainer統合）完了」節を参照。
+  次のアクションは、ユーザーとの相談で決めた新しい作業（`docs/`への
+  ドキュメント再構成→`tour/`入門ガイドの順、フェーズ④とは別枠のStep 9/10と
+  して進める予定）の計画・着手待ち。
 - **フェーズ③Step 1（REPL基盤の再構築）完了（2026-09-04）。**
   - `cmd/execdb/access.go`: `splitStatements`から`scanStatements(sql) (complete []string,
     remainder string)`を切り出し（`splitStatements`はremainderが非空白なら末尾へ追加する
@@ -1484,18 +1484,93 @@ Maven Centralから都度インストール・取得し、それぞれ**自分�
 - 依存追加: Goの`go.mod`/`go.sum`は変更なし（`decodeBinaryParam`は標準
   ライブラリのみ）。Node/Javaの依存はいずれもgitignore済みでコミット対象外
 
-## フェーズ④への申し送り（Step 7完了時点で消化済み）
+## フェーズ④Step 8（仕様書・ルール・PLAN・devcontainer統合）完了（2026-09-04）
 
-このセクションはフェーズ③完了時点（Step 2着手前）の申し送りとして書かれた
-ものだが、フェーズ④Step 2〜7で以下の項目はすべて消化済みになった。
+フェーズ④・全4フェーズの実装を締めくくる最終ステップ。Step 1〜7の実装過程で
+仕様書・ルールファイルへの反映が追いつかず残っていた記述（特に「型マッピングは
+実装時に確定する」「Extended Queryは将来の拡張候補」等、Step 2/5で既に解消済み
+なのに書き換えられていなかった古い記述）を一掃した。
 
-- ~~型マッピング（Postgres OID対応表）~~ → Step 1のスパイクとStep 2で確定・実装済み
-- ~~`--user`認証（cleartext password）~~ → Step 4で実装済み
-- ~~`CancelRequest`/`BackendKeyData`のPID・secretレジストリ~~ → Step 6で実装済み
-- ~~Extended Queryプロトコル~~ → Step 1で採用に方針転換、Step 5で実装済み
-  （さらにStep 7でパラメータ側のバイナリ形式も追加）
+- **`execdb_spec.md`**:
+  - §2: `SET`/`SHOW`が「許可」でも「DDLのように拒否」でもない**第3の区分**
+    であることを明記する新節を追加
+  - §8: 「型マッピング」節を全面書き換え——`affinityOID`の判定順序（`BOOL`/
+    `DATE`|`TIME`を標準5分類より優先、標準5分類、NUMERIC catch-allは実行時Go
+    動的型へのフォールバック）を表形式で確定記載。**古い「具体的な対応表は
+    実装時に確定する」「Extended Queryへの対応は将来の拡張候補」という記述は
+    実態と矛盾するため削除**（前者はStep 1〜2で、後者はStep 5で解消済み）。
+    パラメータ側バイナリデコードの対応OID（8種）も明記。`CancelRequest`/
+    `BackendKeyData`の新節、`SET`/`SHOW`シムのアクセス制御統合節への追記も実施
+  - §9: `-u`/`--user`が`--help`（`printUsage`）と一致していることを確認
+    （変更不要——実装が既に仕様書通りだった）
+  - 冒頭の「既存ドライバ資産がそのまま接続できる」という主張に、実際に
+    実機確認済みのドライバ（pgx/pgJDBC/psycopg/node-postgres）とNpgsql
+    （未検証、Extended Query実装により接続可能なはずという申し送り）を明記
+- **`.claude/rules/pgwire.md`**: 全面改訂。
+  - 「型マッピング」節を確定内容に書き換え（旧「決め打ちで実装せず実際に
+    繋いで確認すること」という指示形の記述を、確定した設計とその理由の
+    説明へ）
+  - `SET`/`SHOW`互換シムの新節を追加（Step 3実装済みだったが、これまで
+    pgwire.mdに一度も記載されていなかった抜け漏れ）
+  - フェーズ①Step 5の「`pgx`はsimple_protocol指定が必須」「全列text固定」
+    という記述に、Step 5/2でそれぞれ解消済みであることを追記（削除はせず、
+    実機確認で発覚した経緯という記録的価値は残しつつ、現状との矛盾を解消）
+- **`.claude/rules/testing.md`**: 「他言語ドライバ検証の運用方針」節を新設
+  （ランタイム未導入環境でのskip、CIジョブをOS別マトリクスに含めない理由、
+  Node/Javaの依存を非コミットにする理由、Debian系`pip install`が
+  `externally-managed-environment`で失敗する問題とapt経由での回避）
+- **`.claude/rules/sqlite-quirks.md`**: フェーズ④Step 1のスパイクで判明した
+  SQLite/`modernc.org/sqlite`固有の事実のうち未記録だったものを追記——
+  `DatabaseTypeName()`が`decltype`を正規化せず返すこと、`ScanType()`が
+  内部の先読みで`Next()`前でも正しい理由と空結果セットでの例外、
+  `ScanType()`と実際の`Scan`結果の型が食い違いうること（`BOOLEAN`列の
+  `bool`対`int64`）、型アフィニティ違反値の挙動、`DATE`系列の自動
+  `time.Time`変換。加えて`$1`プレースホルダをSQLiteがネイティブに解釈できる
+  という事実を新節として追加（Extended Query実装の前提になった発見）
+- **`.claude/rules/naming.md`**: 対応表に`-u`/`--user`の行を追加
+  （REPLコマンド・`engine` API双方が「─」になる、この表で唯一のCLI単独行。
+  認証はREPLにかからず`engine`も認証の概念を持たないため、という理由を
+  説明文に追記）
+- **`.devcontainer/devcontainer.json`**: `postCreateCommand`に
+  `python3-pip`/`python3-psycopg2`/`nodejs`/`npm`/`openjdk-17-jdk-headless`
+  を追加（Step 7で都度手動インストールしていたもの）。「保留事項」の
+  devcontainer反映待ちリストを空にした
+- **確認**: `make check`・`make race`・`make test`とも green（ドキュメント・
+  設定ファイルのみの変更のため回帰リスクは低いが、念のため実行）。
+  `.devcontainer/devcontainer.json`のパッケージ列は`apt-get install --dry-run`
+  で構文・パッケージ名の妥当性を確認済み（実際のdevcontainerリビルドは
+  `.claude/rules/testing.md`「開発環境の前提」の方針通り、フェーズ途中では
+  行わない）
 
-フェーズ④の残りはStep 8（仕様書・ルール・PLAN・devcontainer統合）のみ。
+## フェーズ④（PostgreSQL互換ワイヤープロトコル開発）完了
+
+全8ステップ（スパイク→型マッピング→SET/SHOW互換シム→`--user`認証→
+Extended Query→CancelRequest→他言語ドライバ検証＋CI→ドキュメント統合）を
+完了し、外部I/F（PostgreSQL互換ワイヤープロトコル）は「主要ドライバが
+デフォルト設定のまま、正しい型で、必要なら認証付きで接続・利用できる」
+という当初のゴールを達成した。
+
+**フェーズ④完了の判定（PLAN.md記載の基準、すべて満たした）**:
+`make check`/`make race`/`make test`が通る／`pgx`・pgJDBC・node-postgres・
+psycopgがデフォルト設定のまま接続しSELECT/DML/トランザクションが動く
+（`tests/pgclient`・`tests/drivers/`で自動検証）／数値・BLOB列が各ドライバの
+型付きAPIで読める／DDLが全ドライバから42501で拒否される／`-u`認証（正誤
+パスワード・`EXECDB_PASSWORD`優先・`--no-repl`未設定時の起動中止）が動く／
+別接続からの`CancelRequest`で実行中クエリが中断される／GitHub Actions
+（3OS＋race＋trivy＋drivers）がgreen／仕様書と`.claude/rules/`が実装と
+一致／devcontainer.jsonの反映待ちリストが空になる。**全項目達成。**
+
+これにより、当初計画していた4フェーズ（①ミニマム実装→②`engine`ライブラリ
+開発→③REPL開発→④PostgreSQL互換ワイヤープロトコル開発）すべてが完了した。
+今後のドキュメント（`docs/`への再構成、`tour/`入門ガイド）は、フェーズ④
+完了後の新しい作業として別途計画する
+（`.claude/rules/directory-structure.md`が`tour/`を「実装完了後」に限定
+している方針の通り）。
+
+（フェーズ④への申し送り事項——型マッピング／`--user`認証／`CancelRequest`／
+Extended Queryプロトコル——はStep 2〜7ですべて消化済み。フェーズ④自体の
+完了サマリは上記「フェーズ④（PostgreSQL互換ワイヤープロトコル開発）完了」
+節を参照。）
 
 ## 保留事項
 
@@ -1503,11 +1578,8 @@ Maven Centralから都度インストール・取得し、それぞれ**自分�
   進める方針（都度手動でインストール・設定して進め、フェーズ④完了時に
   まとめて `devcontainer.json` へ反映する）。session内で手動インストール・
   設定を行った場合は、忘れずにここへ追記すること。
-  - **フェーズ④Step 7（他言語ドライバ検証）で手動インストール（2026-09-04）**:
-    `apt-get install python3-pip nodejs npm openjdk-17-jdk-headless
-    python3-psycopg2`（`python3-psycopg2`はpipのPEP 668
-    externally-managed-environment制約を避けるためapt経由を選択）。
-    Node/Javaの依存（`pg`パッケージ、pgJDBCのjar）は`tests/drivers/`配下に
-    gitignore済みの場所へ都度取得する設計にしたため、コンテナ側に
-    恒久化すべきはこれら3ランタイム本体（`python3-pip`/`nodejs`+`npm`/
-    `openjdk-17-jdk-headless`）と`python3-psycopg2`のみ。
+  - （なし。フェーズ④Step 7でインストールした`python3-pip`/`nodejs`+`npm`/
+    `openjdk-17-jdk-headless`/`python3-psycopg2`は、フェーズ④Step 8で
+    `.devcontainer/devcontainer.json`の`postCreateCommand`へ反映済み。
+    Node/Javaの依存（`pg`パッケージ、pgJDBCのjar）は`tests/drivers/`配下の
+    gitignore済みの場所へ都度取得する設計のため、コンテナへの恒久化対象外）

@@ -70,20 +70,34 @@ Step 5では「パラメータは常にテキスト」という前提で、`Bind
 返す設計をやめたわけではない——「サーバーが何を答えたか」と「クライアントが
 何を自己申告したか」は別物、という整理が今回の核心）。
 
-## 型マッピング
+## 型マッピング（確定、フェーズ④Step 1〜2）
 
 SQLiteは動的型付け（型アフィニティ）のため、列の値の型が固定されない。
-`RowDescription`で返すPostgres型OID（`int4`, `text`, `bytea`等）への変換ルールは、
-**主要ドライバ（pgJDBC/psycopg等）で実接続検証しながら確定する**（現時点で
-確定した対応表はない。決め打ちで実装せず、実際に繋いで確認すること）。
+`RowDescription`で返すPostgres型OIDは、**列の宣言型（`decltype`）ベースの
+アフィニティ判定を第一優先とし、宣言型が空（式・集約・リテラル列）または
+SQLite標準5分類の「NUMERIC」catch-allに落ちる場合のみ、先頭行を試験実行して
+得た実際のGo動的型（`ScanType()`）にフォールバックする**という設計で確定した
+（決め打ちで実装せず、実際に主要ドライバ——pgx/psycopg/pgJDBC/node-postgres——
+で接続検証した結果。確定した対応表は`execdb_spec.md`§8参照、実装は
+`cmd/execdb/pgtype.go`の`columnOID`/`affinityOID`/`scanTypeOID`）。
 
-**フェーズ④への申し送り（フェーズ②Step 1実測済み）:** `sql.Rows.ColumnTypes()`
+NUMERIC親和性の宣言型（`NUMERIC`/`DECIMAL(10,2)`等）をあえてフォールバック側に
+回しているのは意図的な設計判断——SQLiteのNUMERIC親和性は内部的に必ずINTEGERか
+REALのいずれかで格納され真の任意精度十進数を持たないため、Postgresの複雑な
+バイナリNUMERIC形式（base-10000桁グループ符号化）の実装を丸ごと回避できる。
+
+**フェーズ②Step 1実測済みの前提（実装に活用）:** `sql.Rows.ColumnTypes()`
 は`modernc.org/sqlite`で`Next()`呼び出し前でも`DatabaseTypeName()`/`ScanType()`/
 `Nullable()`が正しい値を返すことを実測確認済み（`INTEGER`/`REAL`/`TEXT`/`BLOB`/
 `NUMERIC`列、および式列——`dbType`は空文字列、`scanType`は`int64`——で確認。
 詳細は`.claude/rules/sqlite-quirks.md`「`ColumnTypes()`は`Next()`呼び出し前でも
-正しい値を返す」節）。型マッピング実装時はこのAPIをそのまま使ってよく、
-「`Next()`前は不定かもしれない」と慎重になる必要はない。
+正しい値を返す」節）。「`Next()`前は不定かもしれない」と慎重になる必要は
+なかった。
+
+**値の実際のエンコードはOIDではなく`Scan`後の実際のGo動的型を見て行う。**
+宣言型と実際の値の型が食い違う場合（型アフィニティに違反する値が入っている、
+`BOOLEAN`列が実際には`int64`として返る等）があるため、OIDと値の型の対応を
+過信しない設計にした（`pgtype.go`の`pgEncodeValue`のdocコメント参照）。
 
 ## 認証（オプトイン、Zero-Authがデフォルト）
 
@@ -99,6 +113,22 @@ SQLiteは動的型付け（型アフィニティ）のため、列の値の型�
 
 TCPとUNIX Domain Socketの両方に対応する。同一のプロトコル実装をトランスポート
 層だけ差し替えて共有する（プロトコル実装をトランスポートに依存させない）。
+
+## `SET`/`SHOW`互換シム（フェーズ④Step 3）
+
+pgJDBCは接続直後に`SET extra_float_digits = 3`のようなセッションパラメータ
+設定コマンドを自動的に送ってくる。SQLiteには`SET`/`SHOW`という文自体が
+存在しないため、そのまま内部SQLエンジンへ渡すと構文エラーになり接続が
+確立できない（`checkExternalAccess`の拒否対象にも入っていなかったため、
+拒否ですらなく素通しして壊れる、というのが発見時の状態だった）。
+
+`SET`/`SHOW`は`access.go`のDDL/DML分類とは別の、**外部I/F層（pgwireの
+実装）が内部SQLエンジンへ渡す前に横取りする第3の区分**として扱う
+（`cmd/execdb/pgsession.go`、`execdb_spec.md`§2/§8参照）。`access.go`
+自体には手を入れない——「SQLiteへ渡す文の分類器」という役割を保つため。
+`SET`には`CommandComplete("SET")`を、`SHOW`にはその値を1列1行の結果
+（`ParameterStatus`と同じ値）として返し、実際にはSQLite側の設定を
+一切変更しない。値は接続ごとの`sessionParams`（単純なマップ）に保持する。
 
 ## 実装時の気づき（フェーズ①Step 4、`psql`実接続で確認）
 
@@ -121,27 +151,26 @@ TCPとUNIX Domain Socketの両方に対応する。同一のプロトコル実�
   `SELECT`/DDL拒否/複文バイパス拒否/TCP+UDS同時待受/stale socket除去まで
   確認済み）で判明した。
 
-## 実装時の気づき（フェーズ①Step 5、`pgx`実接続で確認）
+## 実装時の気づき（フェーズ①Step 5、`pgx`実接続で確認。フェーズ④Step 2/5で解消済み）
 
 - **`pgx`（Go）はデフォルトでExtended Queryプロトコル（`Parse`/`Bind`/
-  `Execute`）を使う。** ExecDBはSimple Queryのみ実装しているため、何も
-  指定しないと`conn.QueryRow`等の初回呼び出しで`unsupported message type
-  'P'`エラーになる。接続文字列に`default_query_exec_mode=simple_protocol`
-  を付与すると、`pgx`はSimple Queryのみを使うようになり接続できる
-  （`tests/pgclient`のusageメッセージ・`tests/e2e.sh`参照）。`psql`は
-  デフォルトでSimple Queryを使うため、この問題は`psql`では顕在化しない
-  ——つまり「`psql`で繋がった」だけでは他ドライバの互換性を保証しない、
-  という教訓でもある。フェーズ④で他ドライバ確認する際は、まずデフォルト
-  設定で試し、Extended Query前提のドライバであれば同様の「Simple Query
-  強制」オプションの有無を確認すること。
+  `Execute`）を使う。** フェーズ①時点ではExecDBがSimple Queryのみ実装して
+  いたため、何も指定しないと`conn.QueryRow`等の初回呼び出しで
+  `unsupported message type 'P'`エラーになっていた。**フェーズ④Step 5で
+  Extended Queryを実装したことで、この制約自体は解消済み**——現在は
+  `default_query_exec_mode=simple_protocol`の指定なしでも`pgx`が接続できる
+  （`tests/e2e.sh`は指定なし・指定ありの両方を回帰テストとして実行している）。
+  ただし「デフォルト設定でSimple Queryを使うドライバ（`psql`等）だけで
+  確認しても、Extended Queryが前提のドライバの互換性は保証されない」という
+  教訓自体は今後も有効——新しいドライバを確認する際は、まずデフォルト設定で
+  試すこと。
 - **全列をOID 25(text)固定で返す実装（フェーズ①の暫定仕様）は、`pgx`の
-  型チェックの厳しさによって実際に制約として顕在化する。** `psql`は
+  型チェックの厳しさによって実際に制約として顕在化していた。** `psql`は
   テキスト表示するだけなので気づきにくいが、`pgx`は`RowDescription`の
   型情報を厳格に見ており、text型の列を`*int`へ`Scan`しようとすると
   `cannot scan text (OID 25) in text format into *int`のようなエラーで
-  拒否される（`*string`へのScanは常に成功する）。フェーズ④で本来の型
-  マッピングを実装するまでは、`pgx`等の型に厳格なドライバから使う場合、
-  呼び出し側は数値列であっても文字列としてScanする必要がある。
+  拒否される（`*string`へのScanは常に成功する）。**フェーズ④Step 2で
+  本来の型マッピングを実装したことで解消済み**（上記「型マッピング」節）。
 
 ## トランザクションの真の並行分離（フェーズ②Step 5で解決）
 

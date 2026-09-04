@@ -38,6 +38,22 @@ REPL と外部 I/F は、内部SQLエンジンに対する2つの独立したク
 
 **実現手段:** REPL・外部I/Fの1接続はそれぞれ、`engine`パッケージの`DB.Session(ctx)`が返す専有SQLiteコネクション（内部的には`modernc.org/sqlite`の`memdb` VFS上で同一インメモリDBを指す別コネクション、7章参照）に対応する。`BEGIN`/`COMMIT`/`ROLLBACK`はそのコネクション上でSQL文としてそのまま実行され、他コネクションとのロック衝突時の待機・失敗はSQLite自身のbusy-handler機構（`busy_timeout`）に委ねる——ExecDBが独自にロックやキュー、コネクション間の調停を実装することはない。なお`engine.DB`がGoレベルで持つ排他制御（`sync.RWMutex`）は、コネクションの差し替えや`Close`などDB自体のライフサイクル・メタデータ（`Info()`が返す情報等）を保護するためのものであり、SQL実行そのものの同時実行制御ではない（両者は明確に別レイヤーであり、上記の原則と矛盾しない）。
 
+### `SET`/`SHOW`等のセッションコマンド（第3の区分）
+
+外部I/F経由で受け取る文は、上表の「DML/TCLは許可・DDLは拒否」という二分法だけ
+では説明できないものが存在する。PostgreSQLドライバ（特にpgJDBC）は接続直後に
+`SET extra_float_digits = 3`のようなセッションパラメータ設定コマンドを自動的に
+送ってくるが、SQLiteには`SET`/`SHOW`という文自体が存在しないため、そのまま
+内部SQLエンジンへ渡すと構文エラーになり、接続そのものが確立できない。
+
+`SET`/`SHOW`は「許可してSQLiteへ渡す」でも「DDLのように拒否する」でもない
+**第3の区分**として扱う。外部I/F層が内部SQLエンジンへ渡す前に横取りし、
+接続ごとのメモリ上のマップへ値を保持するだけで（SQLite側の設定は実際には
+何も変更しない）、`SET`には`CommandComplete("SET")`を、`SHOW`にはその値を
+1列1行の結果として返す。DDLの拒否のような`ErrorResponse`は返さない——
+ドライバから見ればコマンドが正常に成功したように見える必要があるため。
+詳細は§8参照。
+
 ---
 
 ## 3. REPL コマンド体系
@@ -359,7 +375,7 @@ db.Close()
 
 ## 8. 外部 I/F プロトコル仕様（PostgreSQL互換ワイヤープロトコル）
 
-外部 I/F は、独自プロトコルを新規に定義するのではなく、**PostgreSQLワイヤープロトコル(v3)のサブセット**を実装する方式を採用する。これにより、JDBC(pgJDBC)、Python(psycopg)、Node.js(node-postgres)、.NET(Npgsql)、Go(pgx)など、各言語で既に確立されたPostgreSQL用ドライバ資産が、ExecDB側の追加対応なしにそのまま接続できる。CockroachDB・YugabyteDBなど新興分散DBが採用しているのと同じ戦略である。
+外部 I/F は、独自プロトコルを新規に定義するのではなく、**PostgreSQLワイヤープロトコル(v3)のサブセット**を実装する方式を採用する。これにより、JDBC(pgJDBC)、Python(psycopg)、Node.js(node-postgres)、.NET(Npgsql)、Go(pgx)など、各言語で既に確立されたPostgreSQL用ドライバ資産が、ExecDB側の追加対応なしにそのまま接続できる。CockroachDB・YugabyteDBなど新興分散DBが採用しているのと同じ戦略である。**pgx・pgJDBC・psycopg・node-postgresの4つは、各ドライバ自身のデフォルト接続設定のまま接続・SELECT/DML/トランザクション・DDL拒否が動くことを実機で確認済み（フェーズ④Step 5・7、`tests/pgclient`・`tests/drivers/`）。Npgsqlのみ未検証だが、常にExtended Queryプロトコルを使う実装であるため、フェーズ④Step 5でExtended Queryを採用した時点で接続自体は可能になっているはずという前提で申し送る。**
 
 ### 採用範囲（サブセット）
 
@@ -437,11 +453,47 @@ ExecDBは1章の「Zero-Auth」を核心思想とするが、必要な人だけ�
 * **「ユーザー」という概念は持たない:** マルチユーザー管理・権限分離等は行わず、あくまで「接続に必要な1組の名前＋パスワード」という単純な認証キーとして扱う。
 * **認証方式:** PostgreSQLワイヤープロトコルの `cleartext password` 認証を採用する（`SCRAM`/`MD5`等の本格的な方式は実装しない。§8「採用範囲」参照）。
 
-### 型マッピング
+### 型マッピング（確定、フェーズ④Step 1〜2）
 
-SQLiteは動的型付け（型アフィニティ）のため、列の値の型が固定されない。`RowDescription`メッセージで返すPostgres型OID（`int4`, `text`, `bytea`等）は、SQLiteの型アフィニティに応じたマッピングルールを設けて変換する。具体的な対応表は実装時に、主要ドライバ（pgJDBC/psycopg等）で実接続検証しながら確定する。
+SQLiteは動的型付け（型アフィニティ）のため、列の値の型が固定されない。
+`RowDescription`メッセージで返すPostgres型OIDは、列の宣言型（`decltype`）を
+優先し、SQLite公式の型アフィニティ判定アルゴリズム（sqlite.org/datatype3.html
+§3.1）に沿って以下のように振り分ける。`BOOLEAN`・`DATE`/`DATETIME`/`TIME`は
+SQLite標準の5分類には無い区分だが、`modernc.org/sqlite`が観測可能な形で
+特別扱いする（`BOOLEAN`列は整数格納・`DATE`系列は`Scan`結果が`time.Time`に
+なる）ため、標準の5分類より先に判定する。
 
-Simple Queryのみのサポートのため、プレースホルダを使うAPI呼び出し（`?`や`$1`）は、ドライバ側の実装によっては「クライアント側でSQL文字列に埋め込んでから送信」という形になる場合がある。Extended Queryプロトコルへの対応は将来の拡張候補とする。
+| 宣言型（decltype）に含まれる部分文字列 | Postgres OID | 備考 |
+| :--- | :--- | :--- |
+| `BOOL` | `bool`(16) | 標準5分類より優先判定 |
+| `DATE` または `TIME` | `timestamp`(1114) | 同上 |
+| `INT` | `int8`(20) | 標準分類「INTEGER」 |
+| `CHAR` / `CLOB` / `TEXT` | `text`(25) | 標準分類「TEXT」 |
+| `BLOB` | `bytea`(17) | 標準分類「BLOB」 |
+| `REAL` / `FLOA` / `DOUB` | `float8`(701) | 標準分類「REAL」 |
+| 上記いずれにも該当しない（標準分類「NUMERIC」のcatch-all、例: `NUMERIC`/`DECIMAL(10,2)`） | 下記フォールバックへ | 固定OIDを割り当てない（理由は下記） |
+| 宣言型なし（式・集約・リテラル列） | 下記フォールバックへ | 同上 |
+
+**フォールバック（実行時のGo動的型をサンプリング）:** 上表で確定しない列は、
+先頭行を試験実行して得た`ScanType()`の実際のGo型で振り分ける
+（`int64`→`int8`、`float64`→`float8`、`bool`→`bool`、`[]byte`→`bytea`、
+`time.Time`→`timestamp`、それ以外・行が無い場合→`text`）。**NUMERIC親和性の
+宣言型をこの経路に回しているのは意図的な設計判断**——SQLiteのNUMERIC親和性は
+内部的に必ずINTEGERかREALのいずれかで格納され真の任意精度十進数を持たないため、
+Postgresの複雑なバイナリNUMERIC形式（base-10000桁グループ符号化）を実装する
+代わりに、`int8`/`float8`へ振り分けることでその実装自体を不要にしている。
+
+値のテキスト/バイナリエンコードは、OIDではなく`Scan`後の実際のGo動的型を
+見て行う（宣言型と実際の値の型が食い違う——型アフィニティに違反する値が
+入っている場合があるため）。詳細な実装は`cmd/execdb/pgtype.go`の
+`columnOID`/`affinityOID`/`scanTypeOID`/`pgEncodeValue`を参照。
+
+**パラメータ（`Bind`）側のバイナリ形式デコードで対応するOID:** `int2`(21)/
+`int4`(23)/`int8`(20)/`float4`(700)/`float8`(701)/`bool`(16)/`bytea`(17)/
+`timestamp`(1114)の8種（`int2`/`int4`/`float4`は結果値側の`columnOID`が
+一度も返さないOIDだが、クライアントが自ら申告するパラメータ型としては
+独立に出現するため対応範囲に含む——詳細は下記「パラメータ側のバイナリ
+形式が必要になった経緯」参照）。
 
 ### アクセス制御（§2）との統合
 
@@ -453,6 +505,11 @@ ErrorResponse
   Code:     42501  (insufficient_privilege 相当のSQLSTATEを流用)
   Message:  "DDL statements are not allowed via external interface"
 ```
+
+`SET`/`SHOW`は、この「許可／拒否」の二分法に属さない第3の区分として扱う
+（§2「`SET`/`SHOW`等のセッションコマンド」参照）。外部I/F層が内部SQLエンジンへ
+渡す前に横取りし、接続ごとのメモリ上のマップへ値を保持するだけで
+（`CommandComplete("SET")`／`SHOW`は1列1行の結果）、`ErrorResponse`は返さない。
 
 ### トランザクション（TCL）の扱い
 
@@ -470,6 +527,25 @@ Postgresプロトコルは接続（コネクション）自体がステートフ
 表示上のステータスだけ`'E'`にして実際には文を実行してしまう中途半端な
 実装は、トランザクション状態を厳密に追跡するドライバ（pgx/JDBC等）を
 混乱させるため採用しない。
+
+### クエリキャンセル（`CancelRequest` / `BackendKeyData`、フェーズ④Step 6）
+
+クエリキャンセルには意図的に別々の2つの経路がある。
+
+1. **クライアント切断時の自動キャンセル**（フェーズ②Step 5から）: クエリ実行中の
+   接続への読み取りを別goroutineで監視し、クライアントの切断（あるいは予期しない
+   データ送出）を検知すると実行中のクエリをキャンセルする。
+2. **`CancelRequest`プロトコル**（別接続からの明示キャンセル要求）: 接続確立時、
+   サーバーは`BackendKeyData`メッセージで疑似PID・secretの組をクライアントへ
+   送る。クライアントは**別の新しいコネクション**を張り、そのPID・secretを
+   含む`CancelRequest`を送ることで、対象の接続で実行中のクエリだけを中断できる
+   （接続自体は切断されず、以後も使い続けられる）。PID・secretが一致しない、
+   または対象がアイドル中（実行中のクエリが無い）の場合は無音のno-op——
+   実PostgreSQL準拠。
+
+両者は実装上、同じキャンセル機構を共有する（`cmd/execdb/pgcancel.go`）。
+詳細・実装時に発見した設計上の注意点（`context.CancelFunc`の使い回しに関する
+落とし穴）は`.claude/rules/pgwire.md`参照。
 
 ### トランスポート
 

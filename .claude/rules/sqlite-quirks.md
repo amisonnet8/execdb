@@ -197,6 +197,50 @@ RESERVED/EXCLUSIVEロックと同種の機構を使うため、ロック衝突�
 動的型付けの性質上）は杞憂だった。フェーズ④のPostgres OID型マッピング設計に
 そのまま使える情報。
 
+**フェーズ④Step 1で判明した追加の事実（実装時の網羅実測）:**
+
+- **`DatabaseTypeName()`（宣言型）はSQLiteの`decltype`文字列をそのまま返す。**
+  `VARCHAR(10)`/`DECIMAL(10,2)`/`BOOLEAN`/`DATETIME`のように、SQLite標準の
+  5分類（INTEGER/TEXT/BLOB/REAL/NUMERIC、sqlite.org/datatype3.html §3.1）へ
+  正規化されることはない。OIDを決めるには、この文字列に対しSQLite公式の
+  型アフィニティ判定アルゴリズム（部分文字列マッチ）を呼び出し側で実装する
+  必要がある。
+- **`Next()`前の`ScanType()`が実際の値の型を正しく返すのは、ドライバが内部で
+  最初の1行を先読みしているため。** 空の結果セット（`WHERE 0`等、該当行が
+  1件も無い）では`ScanType()`は`nil`に戻る——「`Next()`前でも常に正しい値を
+  返す」という理解はこの境界条件を除けば正しい。
+- **重大な罠: `ScanType()`が示す型と、実際に`interface{}`へ`Scan`した際に返る
+  Goの動的型は一致しないことがある。** `BOOLEAN`宣言列は`ScanType()`が`bool`
+  を返すが、`interface{}`へ`Scan`すると実際には`int64(1)`が返る（SQLiteは
+  真のbool型を持たず整数格納のため）。**OIDを決めるための型情報
+  （`DatabaseTypeName()`ベース）と、実際の値をPostgresテキスト/バイナリ形式へ
+  エンコードする処理（`Scan`後の実際のGo動的型に対する型スイッチ）は
+  別々に設計する必要がある**——一方だけを見て両者が一致する前提で実装すると
+  壊れる。
+- **型アフィニティに反する値（`INTEGER`列に`'hello'`をINSERT等）は、
+  `DatabaseTypeName()`は宣言どおり`"INTEGER"`のままだが、`Scan`結果は
+  実際の値の型（`string`）になる。** 積極的に宣言型ベースでOIDをマップする
+  以上、この不一致は原理的に残る既知の制限として扱う（意図的に型アフィニティに
+  反するデータを入れた場合のみ発生し、正規のワークロードでは稀という判断）。
+- **`DATE`/`DATETIME`/`TIME`を含む宣言型の列は、文字列を`INSERT`しても
+  `Scan`結果が`time.Time`になる。** `modernc.org/sqlite`が`decltype`にこれらの
+  部分文字列を含む列を検出し、自動的に`time.Time`へ変換している（ドライバ側の
+  挙動であり、SQLite本体の仕様ではない）。
+
+## SQLiteは`$1`形式のプレースホルダをネイティブに解釈できる（フェーズ④Step 1）
+
+SQLiteのパラメータ構文は`?`/`?NNN`/`:AAAA`/`@AAAA`/`$AAAA`の5種類に対応して
+おり、Postgresワイヤープロトコルが使う`$1`/`$2`形式はこの`$AAAA`にそのまま
+合致する。実測の結果、SQLite側で何の書き換えも無しに`$1`をそのままプレース
+ホルダとして受け付け、`?1`と同一に扱えることを確認した。
+
+**実務上の帰結:** Extended Queryプロトコル（`Parse`/`Bind`）が受け取るSQL文を、
+ExecDB側で`$1`→`?1`のような書き換え層を挟む必要が無い。クライアントから
+受け取った文字列をそのまま`sess.PrepareContext`へ渡すだけでよい
+（`cmd/execdb/pgextended.go`の`handleParse`）。この発見が無ければ、SQLの
+プレースホルダ構文パーサを自前で書く必要があり、Extended Query実装の規模が
+一段大きくなっていた。
+
 ## `memdb`の実効サイズ上限は約960MiB付近
 
 `SQLITE_MEMDB_DEFAULT_MAXSIZE`は1073741824（1GiB）だが、実際に大きな

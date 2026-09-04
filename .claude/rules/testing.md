@@ -11,7 +11,7 @@
 | :--- | :--- |
 | コアロジック（`engine`パッケージ、フッター読み書き、`.overwrite`のrename退避方式等） | まずLinux環境・Goのみで開発し、ロジックの正しさを固める。フィードバックループを最速に保つ。 |
 | クロスプラットフォーム動作確認（Windows/macOS） | 開発初期からGitHub Actionsで自動テストを組み、都度確認する。特に`.overwrite`はWindows特有のOS制約（`ERROR_SHARING_VIOLATION`等）が設計に直結しているため、後回しにせず早期から継続的に検証する。 |
-| PostgreSQL互換ワイヤープロトコル | まずGo（`pgx`等）で作りきる。他言語ドライバでの検証はプロトコル実装が固まった後にまとめて行う。 |
+| PostgreSQL互換ワイヤープロトコル | まずGo（`pgx`等）で作りきる。他言語ドライバでの検証はプロトコル実装が固まった後にまとめて行う（実施内容は下記「他言語ドライバ検証」参照）。 |
 | 依存ライブラリの脆弱性・ライセンスチェック | GitHub Actions上で `trivy` を実行し、既知の脆弱性（CVE）とライセンス互換性（MIT/BSD/Apache-2.0等は許可、GPL系等は拒否）をチェックする。ソースコード自体のコピペ検出は対象外（人間レビューに委ねる）。 |
 
 ## 実装後の動作確認について
@@ -194,3 +194,30 @@ Go 1.26.7の`gofmt -s`は、**関数/型/変数などの宣言に直接紐づく
 `ok - ...`の途中で唐突に止まる場合は、まず
 `ps aux | grep execdb`（または該当ポートを`ss -ltnp | grep <port>`）で
 孤児プロセスの有無を確認すること。
+
+## 他言語ドライバ検証の運用方針（フェーズ④Step 7）
+
+Python（psycopg2）・Node.js（node-postgres）・Java（pgJDBC）の3ドライバは、
+`tests/drivers/`配下にチェックスクリプトを置き、`tests/drivers/run-all.sh`
+（`tests/e2e.sh`とCIの`drivers`ジョブが共有する）から実行する。
+
+- **ランタイムが無い環境ではスキップする（失敗扱いにしない）。**
+  `run-all.sh`は各ランタイムを`command -v`で確認し、無ければ`skip -`行を
+  出すだけで次のドライバへ進む——フェーズ③Step 6のPTY専用Ctrl+Cチェック
+  （`script`コマンドが無い環境でスキップする）と同じ既存パターン。手元の
+  devcontainerには標準で入っていないため（`.devcontainer/devcontainer.json`の
+  `postCreateCommand`参照）、`make test`をまっさらな環境で実行しても
+  driversチェックだけがskipになりビルド自体は落ちない。
+- **CIの`drivers`ジョブは`check`の3OSマトリクスには含めず、`ubuntu-latest`
+  限定の別ジョブにする。** pgwireプロトコル実装自体はOS非依存（`-race`と
+  同じ理由付け）であり、3ランタイム×3OSを揃えるセットアップコストに
+  見合わないと判断した。
+- **Node/Javaの依存（`node_modules/`、pgJDBCのjar）はリポジトリへ
+  コミットしない。** `tests/drivers/node/run.sh`・`tests/drivers/java/run.sh`
+  が初回実行時に`npm install`／Maven Centralからの取得を自動で行う
+  （`.gitignore`でこれらのパスを除外——`.claude/rules/distribution.md`の
+  バイナリ非コミット方針の精神を、テスト専用の取得物にも適用したもの）。
+- **Debian系のシステムPython（`python3`）へ`pip install`すると
+  `externally-managed-environment`エラーになる（PEP 668）。** venvを
+  作る代わりに、apt経由の`python3-psycopg2`パッケージを使うことで
+  この制約を回避した（devcontainer/CIどちらも同じ手段）。
