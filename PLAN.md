@@ -325,6 +325,20 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
   - `README.md`/`README_ja.md`のインストール節を、GitHub Releasesが
     自動公開される旨の説明に更新（まだ1件もタグをpushしていないため
     「リリースはまだ無い」旨も明記）
+- **初回リリース`v0.1.0`公開（2026-09-04）。** ユーザーが`git tag v0.1.0`→
+  `git push origin v0.1.0`を実行し、`release.yml`が実際にGitHub Actions上で
+  初回実行された。`check`→6組み合わせの`build`→`release`まで問題なく完走し、
+  `execdb_v0.1.0_{linux,darwin,windows}_{amd64,arm64}`（Windowsのみ`.exe`）＋
+  各`.sha256`の計12アセットが公開されたことをGitHub REST API
+  （`GET /repos/amisonnet8/execdb/releases/tags/v0.1.0`）で実機確認。
+  `README.md`/`README_ja.md`の「リリースはまだ無い」という記述を、
+  ビルド済みバイナリの入手方法（`/releases/latest`——タグを打つたびに
+  自動的に最新へ向くURLのため、以後のリリースでも更新不要）へ差し替えた。
+  **タグの運用方針をユーザーに確認・共有**: 一度pushしたタグは付け直さない
+  （Go moduleとして`sum.golang.org`等に一度取得されると、同じタグ名で別
+  コミットを指すよう変更するとchecksum不一致で壊れるため。修正が要る場合は
+  新しいタグを切る）。push前ならローカルの`git tag -d`はいつでも自由に
+  やり直せる、という区別も確認済み
 - **フェーズ③Step 1（REPL基盤の再構築）完了（2026-09-04）。**
   - `cmd/execdb/access.go`: `splitStatements`から`scanStatements(sql) (complete []string,
     remainder string)`を切り出し（`splitStatements`はremainderが非空白なら末尾へ追加する

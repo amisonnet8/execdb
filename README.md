@@ -18,15 +18,17 @@ box, with their own default connection settings.
 
 ## Install
 
+**Prebuilt binary** (no Go required): grab the file for your platform from
+the [latest release](https://github.com/amisonnet8/execdb/releases/latest)
+— e.g. `execdb_v0.1.0_linux_amd64`, `execdb_v0.1.0_darwin_arm64`,
+`execdb_v0.1.0_windows_amd64.exe`. It's a single raw executable, not an
+archive: download it, `chmod +x` it (not needed on Windows), and run it.
+
+**From source** (requires Go 1.26+):
+
 ```sh
 go install github.com/amisonnet8/execdb/cmd/execdb@latest
 ```
-
-Requires Go 1.26+. Prebuilt binaries for Linux/macOS/Windows (amd64/arm64)
-are published automatically to [GitHub Releases](https://github.com/amisonnet8/execdb/releases)
-whenever a version tag is pushed — grab the one for your platform if you'd
-rather not build from source. No release has been tagged yet as of this
-writing.
 
 ## Quickstart
 

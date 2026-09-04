@@ -19,16 +19,18 @@ DBエンジンとデータ領域を1つの実行ファイル内に保持する�
 
 ## インストール
 
+**ビルド済みバイナリ**（Go不要）: [最新リリース](https://github.com/amisonnet8/execdb/releases/latest)
+から自分のプラットフォーム用のファイルを取得してください——例:
+`execdb_v0.1.0_linux_amd64`、`execdb_v0.1.0_darwin_arm64`、
+`execdb_v0.1.0_windows_amd64.exe`。アーカイブではなく生の実行ファイル
+そのものなので、ダウンロードして`chmod +x`（Windowsでは不要）するだけで
+実行できます。
+
+**ソースからビルド**（Go 1.26以降が必要）:
+
 ```sh
 go install github.com/amisonnet8/execdb/cmd/execdb@latest
 ```
-
-Go 1.26以降が必要です。Linux/macOS/Windows（amd64/arm64）向けのビルド済み
-バイナリは、バージョンタグをpushするたびに
-[GitHub Releases](https://github.com/amisonnet8/execdb/releases)へ自動公開
-されます。ソースからビルドしたくない場合はそちらから該当プラットフォーム用の
-ファイルを取得してください（この文書作成時点では、まだタグをpushしておらず
-リリースはありません）。
 
 ## クイックスタート
 

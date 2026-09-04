@@ -46,6 +46,13 @@
 - **リリース公開:** `softprops/action-gh-release`でタグから直接リリースを
   作成し、生成されたバイナリ・チェックサムをアセットとしてアップロードする
   （`generate_release_notes: true`でコミット履歴から自動生成）。ドラフト
-  ではなく、タグpush時点で即座に公開される（`README.md`の「Prebuilt
-  binaries...are planned but not published yet」という記述は、初回タグ
-  push後に更新すること）。
+  ではなく、タグpush時点で即座に公開される。
+- **初回リリース`v0.1.0`（2026-09-04、実際にタグpush・公開まで確認済み）:**
+  `check`→6組み合わせの`build`→`release`まで問題なく実行され、
+  `execdb_v0.1.0_{linux,darwin,windows}_{amd64,arm64}`（Windowsのみ
+  `.exe`拡張子）＋各`.sha256`の計12アセットが公開されたことを
+  GitHub REST API（`GET /repos/amisonnet8/execdb/releases/tags/v0.1.0`）で
+  実機確認済み。`README.md`/`README_ja.md`の「まだリリースは無い」という
+  記述も、公開確認後に実際の最新リリースへのリンク（`/releases/latest`、
+  タグを打つたびに自動的に最新へ向くため、以後のリリースでもURL自体は
+  更新不要）へ更新済み。
