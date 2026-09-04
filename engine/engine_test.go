@@ -150,3 +150,21 @@ func TestUseAfterCloseReturnsErrClosed(t *testing.T) {
 		t.Errorf("Query after Close: got %v, want ErrClosed", err)
 	}
 }
+
+func TestExecContextRespectsCanceledContext(t *testing.T) {
+	db, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already canceled before the call
+
+	if _, err := db.ExecContext(ctx, "CREATE TABLE t(a INTEGER)"); err == nil {
+		t.Error("expected ExecContext to fail against an already-canceled context")
+	}
+	if _, err := db.QueryContext(ctx, "SELECT 1"); err == nil {
+		t.Error("expected QueryContext to fail against an already-canceled context")
+	}
+}

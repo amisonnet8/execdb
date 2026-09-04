@@ -89,3 +89,21 @@ func TestInspectNonexistentFile(t *testing.T) {
 		t.Error("expected an error for a nonexistent path")
 	}
 }
+
+// TestDecodeFooterRejectsOversizedDataLength checks the MaxDataSize
+// sanity bound is actually exercised, not just coincidentally covered by
+// the offset+length+FooterSize==size arithmetic check: this footer's
+// fields are internally consistent (a real file of the claimed size
+// would pass that check), so only the explicit MaxDataSize comparison
+// catches it. Calling decodeFooter directly (rather than writing an
+// actual >1GiB file) keeps this cheap.
+func TestDecodeFooterRejectsOversizedDataLength(t *testing.T) {
+	const dataOffset = 0
+	const dataLength = MaxDataSize + 1
+	size := int64(dataOffset) + int64(dataLength) + FooterSize
+	footer := encodeFooter(dataOffset, dataLength)
+
+	if _, err := decodeFooter(footer, size); err == nil {
+		t.Error("expected decodeFooter to reject a DataLength larger than MaxDataSize")
+	}
+}

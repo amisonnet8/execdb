@@ -15,11 +15,13 @@ ExecDB では、REPLコマンド・CLI起動オプション・`engine`パッケ�
 | `.load` | ─（REPL専用、CLI起動オプションなし） | `db.Load(path string)` |
 | ─（起動時に暗黙実行） | ─ | `engine.OpenSelf()` |
 | ─（ライブラリ専用、REPL/CLIの対応なし） | ─ | `engine.Open(path string)` / `engine.New()` |
+| ─（ライブラリ専用。`cmd/execdb`のREPL/pgwireがそれぞれ内部で1本ずつ保持する想定） | ─ | `db.Session(ctx context.Context)` |
+| ─（ライブラリ専用、`.load`のio.Reader版） | ─ | `db.LoadFrom(r io.Reader)` |
 
-`engine.OpenSelf()` / `engine.Open()` / `engine.New()` はDBの生成・ロード方法
-であり、ユーザー操作に対応するコマンドではないため、REPLコマンド・CLI起動
-オプションの列が空欄になるのは意図通り（3レイヤー対応の原則が崩れている
-わけではない）。
+`engine.OpenSelf()` / `engine.Open()` / `engine.New()` / `db.Session()` /
+`db.LoadFrom()` はDBの生成・ロード・接続取得方法であり、ユーザー操作に直接
+対応するコマンドではないため、REPLコマンド・CLI起動オプションの列が空欄に
+なるのは意図通り（3レイヤー対応の原則が崩れているわけではない）。
 
 新規追加時も、この3レイヤーの名前が対応するように設計すること。対応関係が
 崩れる変更をする場合は、必ず3箇所（REPL・CLI・`engine`）を同時に確認・修正する。

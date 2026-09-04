@@ -167,42 +167,74 @@ func (db *DB) Info() Info {
 // caller using engine as a library is trusted (spec §6); access control
 // by caller (REPL vs. external I/F) is cmd/execdb's responsibility.
 //
-// Exec, Query and QueryRow each run on a connection borrowed from the
-// pool (db.sdb), used once and returned -- they are one-shot operations,
-// not a session. A statement like BEGIN executed this way appears to
-// succeed, but the transaction it opens is invisible to every later call:
-// database/sql's ResetSession does not roll back an open transaction
-// before returning a connection to the pool, so the next unrelated
-// caller could silently inherit it (.claude/rules/sqlite-quirks.md).
-// Callers that need BEGIN/COMMIT/ROLLACK to mean anything must hold a
-// single dedicated connection across those statements (DB.Session, added
-// in a later step).
+// Exec, Query and QueryRow (and their *Context variants) each run on a
+// connection borrowed from the pool (db.sdb), used once and returned --
+// they are one-shot operations, not a session. A statement like BEGIN
+// executed this way appears to succeed, but the transaction it opens is
+// invisible to every later call: database/sql's ResetSession does not
+// roll back an open transaction before returning a connection to the
+// pool, so the next unrelated caller could silently inherit it
+// (.claude/rules/sqlite-quirks.md). Callers that need
+// BEGIN/COMMIT/ROLLBACK to mean anything must hold a single dedicated
+// connection across those statements: use Session instead.
 func (db *DB) Exec(query string, args ...any) (sql.Result, error) {
+	return db.ExecContext(context.Background(), query, args...)
+}
+
+func (db *DB) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	sdb, err := db.pooled()
 	if err != nil {
 		return nil, err
 	}
-	return sdb.ExecContext(context.Background(), query, args...)
+	return sdb.ExecContext(ctx, query, args...)
 }
 
 func (db *DB) Query(query string, args ...any) (*sql.Rows, error) {
+	return db.QueryContext(context.Background(), query, args...)
+}
+
+func (db *DB) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	sdb, err := db.pooled()
 	if err != nil {
 		return nil, err
 	}
-	return sdb.QueryContext(context.Background(), query, args...)
+	return sdb.QueryContext(ctx, query, args...)
 }
 
-// QueryRow behaves like Exec/Query, with one difference after Close: it
-// cannot return ErrClosed directly, because *sql.Row has no way to carry
-// a caller-supplied error before Scan is called. A QueryRow call made
-// after Close instead surfaces database/sql's own "sql: database is
-// closed" once Scan is called on the result.
 func (db *DB) QueryRow(query string, args ...any) *sql.Row {
+	return db.QueryRowContext(context.Background(), query, args...)
+}
+
+// QueryRowContext behaves like ExecContext/QueryContext, with one
+// difference after Close: it cannot return ErrClosed directly, because
+// *sql.Row has no way to carry a caller-supplied error before Scan is
+// called. A QueryRowContext call made after Close instead surfaces
+// database/sql's own "sql: database is closed" once Scan is called on
+// the result.
+func (db *DB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
 	db.mu.RLock()
 	sdb := db.sdb
 	db.mu.RUnlock()
-	return sdb.QueryRowContext(context.Background(), query, args...)
+	return sdb.QueryRowContext(ctx, query, args...)
+}
+
+// Session opens a dedicated connection to db's live database: one
+// independent client (spec §2/§8), such as a single pgwire connection or
+// the REPL's own connection. Unlike Exec/Query/QueryRow, which borrow a
+// connection from the pool for a single statement, a Session holds the
+// same underlying connection across calls, so BEGIN/COMMIT/ROLLBACK
+// executed through it behave like a real SQL transaction. The caller
+// must Close it when done.
+func (db *DB) Session(ctx context.Context) (*Session, error) {
+	sdb, err := db.pooled()
+	if err != nil {
+		return nil, err
+	}
+	conn, err := sdb.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &Session{conn: conn}, nil
 }
 
 // pooled returns db.sdb for a one-shot call, or ErrClosed if db has

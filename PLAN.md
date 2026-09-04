@@ -489,7 +489,39 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
     `make test`（`examples/e2e.sh`——REPL・`.snapshot`・`.load`・`.overwrite`・
     pgwire TCP/UDS・`go install`まで全チェック）とも green を確認済み。
     依存追加なし（`go.mod`/`go.sum`変更なし、trivy不要）
-- 次のアクション: フェーズ②Step 3（`Session`とcontext API）に着手する。
+- **フェーズ②Step 3（`Session`とcontext API）完了（2026-09-04）。**
+  - `engine/footer.go`: `Inspect`から`decodeFooter(footer []byte, size int64) (Info, error)`
+    を切り出し（`Inspect`と新設`LoadFrom`で共有）。`MaxDataSize`定数を追加
+    （`1<<30`＝1GiB。Step 1実測の約960MiB上限を踏まえた安全側の妥当性チェック用）
+  - `engine/session.go`（新規）: `Session`型（専有`*sql.Conn`を保持）。
+    `Exec`/`ExecContext`/`Query`/`QueryContext`/`QueryRow`/`QueryRowContext`/
+    `Close`（冪等）。**`Begin`/`BeginTx`はあえて追加しない**——`BEGIN`は
+    Sessionの専有接続にSQL文としてそのまま流せば十分にトランザクションとして
+    機能し、`*sql.Tx`を挟むと`database/sql`が関知しない二重管理になるため
+  - `engine/engine.go`: `Exec`/`Query`/`QueryRow`を`*Context`版の薄いラッパーに
+    整理し、`ExecContext`/`QueryContext`/`QueryRowContext`をexport。
+    `(db *DB) Session(ctx) (*Session, error)`を追加
+  - `engine/persist.go`: `LoadFrom(r io.Reader) error`を追加（`SnapshotTo`の対）。
+    `Load`/`LoadFrom`共通の`applyLoadedData(info, blob)`ヘルパーに統合
+  - `engine/doc.go`: パッケージdocを更新（`net/net-http`という既存タイポを
+    `net`/`net/http`に修正、`Session`の説明を追加）
+  - **重要な追加発見（`.claude/rules/sqlite-quirks.md`へ記録）:** `memdb`は
+    明示トランザクション中でも`SHARED`ロックが文をまたいで保持され続けると
+    は限らない。「Bで先に`BEGIN`＋ダミー読み取りしておけば以後ブロックされ
+    ない」という設計は実測で効かず、`TestSessionTransactionIsolation`は
+    「有界に待った後、正しい最終状態が見える」という実際の挙動に即した形へ
+    設計し直した
+  - `.claude/rules/naming.md`: 対応表に`db.Session(ctx)` / `db.LoadFrom(r)`行を追加
+  - 新規テスト（`TestSessionTransactionIsolation`/
+    `TestSessionSeesCommittedWritesFromAnotherSession`/
+    `TestSessionContextCancel`/`TestSessionCloseIsIdempotent`/
+    `TestLoadFromReaderRoundTrip`/`TestLoadFromReaderWithoutDataIsError`/
+    `TestDecodeFooterRejectsOversizedDataLength`/
+    `TestExecContextRespectsCanceledContext`）を追加、全32テストPASS
+  - `make check`（`CGO_ENABLED=0`）・`go test -race ./...`
+    （`CGO_ENABLED=1`）・`make test`（e2e、cmd/execdb結線は未変更ながら
+    engine内部の大幅変更の影響確認のため実行）とも green を確認済み
+- 次のアクション: フェーズ②Step 4（並行性テストと`-race`の常設化）に着手する。
 
 ## 保留事項
 

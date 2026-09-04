@@ -284,7 +284,48 @@ func (db *DB) Load(path string) error {
 	if blob == nil {
 		return fmt.Errorf("engine: %s: %w", path, ErrNoData)
 	}
+	if err := db.applyLoadedData(info, blob); err != nil {
+		return fmt.Errorf("engine: %s: %w", path, err)
+	}
+	return nil
+}
 
+// LoadFrom behaves like Load, but reads the image (engine bytes + data +
+// footer) from r instead of a named file (spec §6: "汎用的な読み書き（任意の
+// ファイル、io.Writer）" -- the read-side counterpart to SnapshotTo).
+// Because r has no name, the resulting Info's Path is "".
+func (db *DB) LoadFrom(r io.Reader) error {
+	buf, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+
+	size := int64(len(buf))
+	var footer []byte
+	if size >= FooterSize {
+		footer = buf[size-FooterSize:]
+	}
+	info, err := decodeFooter(footer, size)
+	if err != nil {
+		return fmt.Errorf("engine: %w", err)
+	}
+	if !info.HasData {
+		return fmt.Errorf("engine: %w", ErrNoData)
+	}
+
+	blob := buf[info.DataOffset : info.DataOffset+info.DataLength]
+	if err := db.applyLoadedData(info, blob); err != nil {
+		return fmt.Errorf("engine: %w", err)
+	}
+	return nil
+}
+
+// applyLoadedData replaces the live database's content with blob and
+// records info as the DB's new Info(). sourcePath/engineSize are
+// deliberately left untouched: they track the engine bytes a later
+// Snapshot should carry forward, which Load/LoadFrom must never change
+// (spec §4).
+func (db *DB) applyLoadedData(info Info, blob []byte) error {
 	db.mu.RLock()
 	dsn := db.dsn
 	closed := db.closed
@@ -294,13 +335,9 @@ func (db *DB) Load(path string) error {
 	}
 
 	if err := loadBlobInto(blob, dsn); err != nil {
-		return fmt.Errorf("engine: %s: %w", path, err)
+		return err
 	}
 
-	// info reflects which file this DB's data came from and is updated on
-	// every successful Load. sourcePath/engineSize are deliberately left
-	// untouched: they track the engine bytes a later Snapshot should
-	// carry forward, which Load must never change (spec §4).
 	db.mu.Lock()
 	db.info = info
 	db.mu.Unlock()

@@ -298,6 +298,59 @@ func TestLoadOnFileWithoutDataIsError(t *testing.T) {
 	}
 }
 
+// TestLoadFromReaderRoundTrip covers LoadFrom, the read-side counterpart
+// to SnapshotTo (spec §6's "汎用的な読み書き（任意のファイル、io.Writer）").
+func TestLoadFromReaderRoundTrip(t *testing.T) {
+	src, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if _, err := src.Exec("CREATE TABLE t(a INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.Exec("INSERT INTO t VALUES (5)"); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := src.SnapshotTo(&buf); err != nil {
+		t.Fatalf("SnapshotTo: %v", err)
+	}
+
+	dst, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dst.Close()
+	if err := dst.LoadFrom(&buf); err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+
+	var n int
+	if err := dst.QueryRow("SELECT a FROM t").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 5 {
+		t.Errorf("got %d, want 5", n)
+	}
+	if info := dst.Info(); !info.HasData || info.Path != "" {
+		t.Errorf("Info() = %+v, want HasData=true and Path=\"\" (LoadFrom has no file name)", info)
+	}
+}
+
+func TestLoadFromReaderWithoutDataIsError(t *testing.T) {
+	db, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := db.LoadFrom(bytes.NewReader([]byte("not an ExecDB image"))); err == nil {
+		t.Error("expected LoadFrom to fail on a reader with no ExecDB data")
+	}
+}
+
 func TestLoadDoesNotChangeEnginePrefix(t *testing.T) {
 	// spec §4: .load never references the source file's engine portion --
 	// only its data -- even when the source is itself an ExecDB executable.

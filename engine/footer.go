@@ -16,6 +16,14 @@ const (
 	// FormatVersion is the current data-blob format version written into
 	// a footer's Version field.
 	FormatVersion = 1
+	// MaxDataSize is the largest data blob engine can hold. It matches
+	// modernc.org/sqlite's memdb VFS default ceiling
+	// (SQLITE_MEMDB_DEFAULT_MAXSIZE = 1GiB); Step 1's spike found
+	// SQLITE_FULL in practice a bit below that, around 960MiB (PLAN.md
+	// "フェーズ②Step 1で確定した事実", .claude/rules/sqlite-quirks.md). A
+	// footer claiming a DataLength larger than this is necessarily
+	// corrupt.
+	MaxDataSize = 1 << 30
 )
 
 // Info describes what, if anything, an ExecDB footer says about a file.
@@ -32,42 +40,59 @@ type Info struct {
 // mismatch before calling Load use this (spec §4); engine itself never
 // logs.
 func Inspect(path string) (Info, error) {
-	info := Info{Path: path}
-
 	f, err := os.Open(path)
 	if err != nil {
-		return info, err
+		return Info{Path: path}, err
 	}
 	defer f.Close()
 
 	stat, err := f.Stat()
 	if err != nil {
-		return info, err
+		return Info{Path: path}, err
 	}
 	size := stat.Size()
-	if size < FooterSize {
-		return info, nil // too small to hold a footer: no data
+
+	var footer []byte
+	if size >= FooterSize {
+		footer = make([]byte, FooterSize)
+		if _, err := f.ReadAt(footer, size-FooterSize); err != nil {
+			return Info{Path: path}, err
+		}
 	}
 
-	footer := make([]byte, FooterSize)
-	if _, err := f.ReadAt(footer, size-FooterSize); err != nil {
-		return info, err
+	info, err := decodeFooter(footer, size)
+	info.Path = path
+	if err != nil {
+		return info, fmt.Errorf("engine: %s: %w", path, err)
 	}
-	if string(footer[0:8]) != Magic {
-		return info, nil // an engine-only binary, or a foreign file
+	return info, nil
+}
+
+// decodeFooter parses a FooterSize-byte trailing footer (already
+// extracted from wherever it lives) against the total size, in bytes, of
+// whatever it came from, and reports what it says. footer may be nil or
+// shorter than FooterSize if size < FooterSize; a footer whose magic
+// doesn't match, or a size too small to hold one, means "no data" rather
+// than an error -- only a footer whose magic matches but whose fields are
+// inconsistent with size is an error. Shared by Inspect (a file's footer)
+// and LoadFrom (an io.Reader's, persist.go).
+func decodeFooter(footer []byte, size int64) (Info, error) {
+	if size < FooterSize || string(footer[0:8]) != Magic {
+		return Info{}, nil
 	}
 
 	dataOffset := int64(binary.BigEndian.Uint64(footer[12:20]))
 	dataLength := int64(binary.BigEndian.Uint64(footer[20:28]))
-	if dataOffset < 0 || dataLength < 0 || dataOffset+dataLength+FooterSize != size {
-		return info, fmt.Errorf("engine: %s: corrupt ExecDB footer (offset=%d length=%d file size=%d)", path, dataOffset, dataLength, size)
+	if dataOffset < 0 || dataLength < 0 || dataLength > MaxDataSize || dataOffset+dataLength+FooterSize != size {
+		return Info{}, fmt.Errorf("corrupt ExecDB footer (offset=%d length=%d size=%d)", dataOffset, dataLength, size)
 	}
 
-	info.HasData = true
-	info.Version = binary.BigEndian.Uint32(footer[8:12])
-	info.DataOffset = dataOffset
-	info.DataLength = dataLength
-	return info, nil
+	return Info{
+		HasData:    true,
+		Version:    binary.BigEndian.Uint32(footer[8:12]),
+		DataOffset: dataOffset,
+		DataLength: dataLength,
+	}, nil
 }
 
 // encodeFooter builds the trailing footer for an image whose engine
