@@ -120,7 +120,12 @@ echo "$out" | grep -qx '99' || fail "data did not survive .overwrite"
 pass ".overwrite: persists data into the running executable and cleans up its sidecar"
 
 # --- pgwire over TCP: psql SELECT, DDL rejected, multi-statement bypass rejected (spec §8) ---
-cp "$BIN" "$WORK/pgtcp"
+# Starts from snap1 (already has table t(a INTEGER), seeded above) rather
+# than a blank binary: DDL is rejected via the external I/F (spec §2), so
+# examples/pgclient's transaction-isolation/failed-tx-state checks below
+# need a table that already exists.
+cp "$WORK/snap1" "$WORK/pgtcp"
+chmod +x "$WORK/pgtcp"
 pid=$(start_server "$WORK/pgtcp" -n -p 127.0.0.1:15532 -q)
 wait_for_tcp 127.0.0.1 15532
 
@@ -152,6 +157,46 @@ go run "$ROOT/examples/pgclient" "postgres://any@127.0.0.1:15532/any?sslmode=dis
 pass "pgwire TCP: examples/pgclient (pgx) SELECT/NULL/DDL-rejection checks"
 
 stop_server "$pid"
+
+# --- a pgwire session held open across a concurrent REPL .load sees the
+#     newly loaded data (spec §2/§4; phase 2 Step 2's in-place backup and
+#     Step 5's 1-connection-per-Session wiring) ---
+cp "$BIN" "$WORK/pgsession"
+FIFO="$WORK/repl_in"
+mkfifo "$FIFO"
+"$WORK/pgsession" -p 127.0.0.1:15534 -q <"$FIFO" >/dev/null 2>&1 &
+repl_pid=$!
+SERVER_PIDS+=("$repl_pid")
+exec 9>"$FIFO"
+wait_for_tcp 127.0.0.1 15534
+
+echo "CREATE TABLE u(b TEXT);" >&9
+echo "INSERT INTO u VALUES ('before-load');" >&9
+sleep 0.2
+
+# Fires .load into the REPL while the single psql session below (opened
+# once, held open across both SELECTs via "\! sleep") is mid-script, so
+# the .load genuinely runs concurrently with an open pgwire session.
+( sleep 0.3; echo ".load $WORK/snap1" >&9 ) &
+loader_bg=$!
+
+session_out="$(psql -h 127.0.0.1 -p 15534 -U any -d any -tA <<'SQL'
+SELECT b FROM u;
+\! sleep 1
+SELECT a FROM t;
+SQL
+)"
+wait "$loader_bg"
+
+echo "$session_out" | grep -qx 'before-load' \
+  || fail "pgwire session did not see REPL-inserted data before .load (got: $session_out)"
+echo "$session_out" | grep -qx '7' \
+  || fail "pgwire session did not see .load's new data while held open (got: $session_out)"
+pass "pgwire session survives a concurrent REPL .load and sees the new data"
+
+echo ".exit" >&9
+exec 9>&-
+stop_server "$repl_pid"
 
 # --- pgwire over UNIX domain socket (spec §8) ---
 # libpq expects a socket named "<dir>/.s.PGSQL.<port>" under -h <dir>

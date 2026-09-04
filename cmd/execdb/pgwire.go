@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/amisonnet8/execdb/engine"
 )
@@ -72,6 +74,14 @@ func acceptLoop(ln net.Listener, db *engine.DB) {
 // handleConnection runs one client session: the authentication handshake
 // (spec §8, Zero-Auth only in phase 1), then a loop of Simple Query /
 // Terminate messages (.claude/rules/pgwire.md's protocol subset).
+//
+// One TCP/UDS connection gets exactly one engine.Session (spec §2/§8: the
+// external I/F is an independent client of the live database, with its
+// own real SQL transactions -- see engine/session.go). The Session's
+// context is canceled when this connection ends, including when the
+// client disconnects while a query is still running (watchForDisconnect
+// below); phase 2's scope stops at that (a separate connection's
+// CancelRequest is phase 4, .claude/rules/pgwire.md).
 func handleConnection(conn net.Conn, db *engine.DB) {
 	defer conn.Close()
 
@@ -82,6 +92,17 @@ func handleConnection(conn net.Conn, db *engine.DB) {
 		return
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sess, err := db.Session(ctx)
+	if err != nil {
+		writeErrorResponse(conn, sqlstateGeneric, err.Error())
+		return
+	}
+	defer sess.Close()
+
+	txState := byte('I')
 	for {
 		msg, err := readFrontendMessage(conn)
 		if err != nil {
@@ -89,10 +110,13 @@ func handleConnection(conn net.Conn, db *engine.DB) {
 		}
 		switch msg.Type {
 		case 'Q':
-			if err := handleSimpleQuery(conn, db, cStringFromBody(msg.Body)); err != nil {
+			stop := watchForDisconnect(conn, cancel)
+			txState, err = handleSimpleQuery(ctx, conn, sess, txState, cStringFromBody(msg.Body))
+			stop()
+			if err != nil {
 				return
 			}
-			if err := writeReadyForQuery(conn, 'I'); err != nil {
+			if err := writeReadyForQuery(conn, txState); err != nil {
 				return
 			}
 		case 'X':
@@ -101,10 +125,47 @@ func handleConnection(conn net.Conn, db *engine.DB) {
 			if writeErrorResponse(conn, sqlstateGeneric, fmt.Sprintf("unsupported message type %q", msg.Type)) != nil {
 				return
 			}
-			if err := writeReadyForQuery(conn, 'I'); err != nil {
+			if err := writeReadyForQuery(conn, txState); err != nil {
 				return
 			}
 		}
+	}
+}
+
+// watchForDisconnect starts watching conn for the peer disconnecting
+// while the caller is busy running a query (during which the caller
+// itself is not reading from conn), and calls cancel if that happens.
+// The caller must call the returned stop before resuming its own reads
+// from conn, or the two would race for the same bytes.
+//
+// Simple Query is a strict request/response protocol: the client will
+// not send another message on this connection until it receives this
+// query's response, so a Read here should stay blocked with nothing
+// arriving for as long as the query legitimately runs. If that Read
+// returns instead -- an error (the peer closed the connection) or
+// unexpected data (a protocol violation) -- something is wrong and
+// canceling ctx is the safest reaction, since it stops an in-progress
+// query from continuing to run for a client that is no longer listening.
+func watchForDisconnect(conn net.Conn, cancel context.CancelFunc) (stop func()) {
+	stopped := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		var buf [1]byte
+		conn.Read(buf[:])
+		select {
+		case <-stopped:
+			// stop() below force-unblocked this Read via SetReadDeadline;
+			// the query simply finished normally.
+		default:
+			cancel()
+		}
+	}()
+	return func() {
+		close(stopped)
+		conn.SetReadDeadline(time.Now())
+		<-watcherDone
+		conn.SetReadDeadline(time.Time{})
 	}
 }
 
@@ -166,37 +227,71 @@ func sendStartupResponse(conn net.Conn) error {
 }
 
 // handleSimpleQuery runs every statement in query in order (spec §8:
-// Simple Query only). A returned error means the connection itself
-// failed and the caller should give up on it; a SQL-level error is
-// reported via ErrorResponse and simply stops the rest of this batch
-// (matching real PostgreSQL, which does not run later statements in a
-// multi-statement message after one fails).
-func handleSimpleQuery(conn net.Conn, db *engine.DB, query string) error {
+// Simple Query only), tracking transaction state across the connection
+// the way real PostgreSQL's ReadyForQuery status byte does: txState is
+// 'I' (idle), 'T' (inside a transaction), or 'E' (inside a transaction
+// that hit an error and can no longer execute anything but
+// COMMIT/ROLLBACK). It returns the state after processing query.
+//
+// A returned error means the connection itself failed (including its
+// context being canceled -- e.g. by watchForDisconnect) and the caller
+// should give up on it; a SQL-level error is reported via ErrorResponse
+// and simply stops the rest of this batch (matching real PostgreSQL,
+// which does not run later statements in a multi-statement message after
+// one fails).
+func handleSimpleQuery(ctx context.Context, conn net.Conn, sess *engine.Session, txState byte, query string) (byte, error) {
 	if strings.TrimSpace(query) == "" {
-		return nil
+		return txState, nil
 	}
 	if err := checkExternalAccess(query); err != nil {
-		return writeErrorResponse(conn, sqlstateInsufficientPrivilege, err.Error())
+		if werr := writeErrorResponse(conn, sqlstateInsufficientPrivilege, err.Error()); werr != nil {
+			return txState, werr
+		}
+		if txState == 'T' {
+			return 'E', nil
+		}
+		return txState, nil
 	}
+
 	for _, stmt := range splitStatements(query) {
 		if strings.TrimSpace(stmt) == "" {
 			continue
 		}
-		ok, err := execOneStatement(conn, db, stmt)
+		kw := firstKeyword(stmt)
+
+		if txState == 'E' && kw != "COMMIT" && kw != "ROLLBACK" && kw != "END" {
+			if err := writeErrorResponse(conn, sqlstateInFailedTransaction,
+				"current transaction is aborted, commands ignored until end of transaction block"); err != nil {
+				return txState, err
+			}
+			return txState, nil
+		}
+
+		ok, err := execOneStatement(ctx, conn, sess, stmt)
 		if err != nil {
-			return err
+			return txState, err
 		}
 		if !ok {
-			return nil
+			if txState == 'T' {
+				txState = 'E'
+			}
+			return txState, nil
+		}
+
+		switch kw {
+		case "BEGIN":
+			txState = 'T'
+		case "COMMIT", "ROLLBACK", "END":
+			txState = 'I'
 		}
 	}
-	return nil
+	return txState, nil
 }
 
-func execOneStatement(conn net.Conn, db *engine.DB, stmt string) (ok bool, err error) {
+func execOneStatement(ctx context.Context, conn net.Conn, sess *engine.Session, stmt string) (ok bool, err error) {
 	trimmed := strings.TrimSpace(stmt)
 	if looksLikeRowReturning(trimmed) {
-		rows, qerr := db.Query(stmt)
+		rows, qerr := sess.QueryContext(ctx, stmt)
 		if qerr != nil {
 			return false, writeErrorResponse(conn, sqlstateGeneric, qerr.Error())
 		}
@@ -204,7 +299,7 @@ func execOneStatement(conn net.Conn, db *engine.DB, stmt string) (ok bool, err e
 		return sendRows(conn, rows)
 	}
 
-	result, qerr := db.Exec(stmt)
+	result, qerr := sess.ExecContext(ctx, stmt)
 	if qerr != nil {
 		return false, writeErrorResponse(conn, sqlstateGeneric, qerr.Error())
 	}

@@ -545,9 +545,50 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
   - `.claude/rules/testing.md`: `-race`の運用方針（`make race`を`check`と
     分離した理由、CIでWindowsを対象外にした理由）を追記
   - `make check`・`make race`・`make test`（e2e）とも green を確認済み
-- 次のアクション: フェーズ②Step 5（`cmd/execdb`結線: pgwire 1接続=1
-  `Session`化、REPLのSession化、`ReadyForQuery`の`'I'/'T'/'E'`、
-  クライアント切断時のクエリキャンセル）に着手する。
+- **フェーズ②Step 5（`cmd/execdb`結線）完了（2026-09-04）。**
+  - `cmd/execdb/pgwire.go`: **1 TCP/UDS接続 = 1`engine.Session`**に変更
+    （`handleConnection`冒頭で`db.Session(ctx)`、`defer sess.Close()`）。
+    接続ごとの`context.Context`を`handleSimpleQuery`/`execOneStatement`に
+    貫通させ、`sess.ExecContext`/`sess.QueryContext`で実行。
+    `watchForDisconnect`（新規）——クエリ実行中だけ別goroutineで`conn`への
+    1バイトRead待ちを行い、クライアント切断（またはプロトコル違反の
+    予期しないデータ）を検知して`cancel()`する。`stop()`は
+    `SetReadDeadline`で強制的にReadを解除してから確実にgoroutineの終了を
+    待ってから戻る（`conn`の二重読み取りレースを避けるための同期）。
+    `handleSimpleQuery`に`txState`（`'I'`/`'T'`/`'E'`）追跡を追加:
+    `BEGIN`成功→`'T'`／`COMMIT`・`ROLLBACK`・`END`成功→`'I'`／`'T'`中の
+    エラー→`'E'`。**`'E'`中は`COMMIT`/`ROLLBACK`/`END`以外をSQLSTATE
+    `25P02`で拒否**（表示だけ`'E'`にして実行を通す中途半端な実装は
+    しない）
+  - `cmd/execdb/pgproto.go`: `sqlstateInFailedTransaction = "25P02"`を追加
+  - `cmd/execdb/repl.go`: `runREPL`が起動時に1本`Session`を張り、`execSQL`・
+    `.tables`（`cmdTables`）・`.schema`（`cmdSchema`）はそのSession経由に。
+    `.snapshot`/`.overwrite`/`.load`はDBレベル操作なので`db`経由のまま
+    （必須の変更——`ResetSession`がロールバックしないため、素朴に
+    `db.Exec`のままだとREPLの`BEGIN`が壊れる。N-7）
+  - `examples/pgclient/main.go`: `checkTransactionIsolation`（2接続で
+    BEGIN/INSERT→他方から見えない→COMMIT→見える。`memdb`の直列化特性を
+    踏まえgoroutine+boundedな待ちで検証）／`checkFailedTransactionState`
+    （tx中にエラー→次の文が25P02→ROLLBACKで復帰）／
+    `checkDisconnectDuringQuery`（クエリのcontextをタイムアウトさせて
+    pgxに接続を諦めさせ、直後の別接続がすぐ繋がることでサーバーが
+    居座っていないことを確認）を追加
+  - `examples/e2e.sh`: pgtcpサーバーを空バイナリではなくテーブル入りの
+    `snap1`スナップショットから起動するよう変更（DDLは外部I/F経由で
+    拒否されるため、pgclientの新規チェックにはテーブルが最初から必要）。
+    FIFO経由でREPLへ`.load`を送りつつ、1本のpsqlセッション（heredoc＋
+    `\! sleep`で接続を保持したまま）が`.load`前後両方のデータを見られる
+    ことを確認する新規チェックを追加。3回連続実行でflakinessなしを確認
+  - `.claude/rules/pgwire.md`:「既知の制約: トランザクションの真の並行
+    分離は未対応」節を削除し、解決済みの記述（`Session`による分離、
+    `'I'/'T'/'E'`、切断時キャンセルの範囲と`CancelRequest`との違い）に
+    差し替え
+  - `make check`・`make race`・`make test`（e2e、3回連続実行）とも
+    green を確認済み
+- **フェーズ②（`engine`ライブラリ開発）全ステップ完了。** 次のアクション:
+  Step 6（仕様書・ルール・PLANへの反映）に着手する。§2/§4/§6/§7/§8の
+  乖離修正、naming.md（完了済み分の再確認）、testing.mdへの追記など、
+  上記「フェーズ②のステップ」節のStep 6の内容を実施する。
 
 ## 保留事項
 

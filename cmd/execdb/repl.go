@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -28,7 +29,21 @@ func isInteractive(f *os.File) bool {
 // accumulates across lines until a line ends with ";"; dot-commands are
 // always a single line. Query results go to stdout; prompts, banners and
 // errors go to stderr (.claude/rules/cli-output.md).
+//
+// The REPL holds one engine.Session for its entire run, the same
+// independent-client model pgwire uses (spec §2/§8). This is not
+// optional: database/sql's ResetSession does not roll back a transaction
+// left open on a pooled connection (.claude/rules/sqlite-quirks.md), so
+// running BEGIN through db.Exec's one-shot pooled connections would let
+// COMMIT silently land on a different connection than BEGIN did.
 func runREPL(db *engine.DB, opts *options) {
+	sess, err := db.Session(context.Background())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		return
+	}
+	defer sess.Close()
+
 	interactive := isInteractive(os.Stdin)
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
@@ -49,7 +64,7 @@ func runREPL(db *engine.DB, opts *options) {
 		trimmed := strings.TrimSpace(line)
 
 		if buf.Len() == 0 && strings.HasPrefix(trimmed, ".") {
-			if handleDotCommand(db, opts, trimmed) {
+			if handleDotCommand(db, sess, opts, trimmed) {
 				return
 			}
 			continue
@@ -61,7 +76,7 @@ func runREPL(db *engine.DB, opts *options) {
 		buf.WriteString(line)
 		buf.WriteString("\n")
 		if strings.HasSuffix(trimmed, ";") {
-			execSQL(db, buf.String())
+			execSQL(sess, buf.String())
 			buf.Reset()
 		}
 	}
@@ -73,13 +88,13 @@ func runREPL(db *engine.DB, opts *options) {
 // execSQL runs one accumulated SQL statement, choosing Query over Exec
 // for statements that return rows. This is a simple keyword check, not a
 // real parser -- adequate for phase 1's minimal REPL.
-func execSQL(db *engine.DB, stmt string) {
+func execSQL(sess *engine.Session, stmt string) {
 	trimmed := strings.TrimSpace(stmt)
 	if trimmed == "" {
 		return
 	}
 	if looksLikeRowReturning(trimmed) {
-		rows, err := db.Query(stmt)
+		rows, err := sess.Query(stmt)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 			return
@@ -88,7 +103,7 @@ func execSQL(db *engine.DB, stmt string) {
 		printRows(rows)
 		return
 	}
-	if _, err := db.Exec(stmt); err != nil {
+	if _, err := sess.Exec(stmt); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 	}
 }
@@ -105,8 +120,11 @@ func looksLikeRowReturning(stmt string) bool {
 
 // handleDotCommand runs one dot-command and reports whether the REPL
 // should now exit (".exit"/".quit", or a successful ".overwrite" -- spec
-// §3, §4).
-func handleDotCommand(db *engine.DB, opts *options, line string) (exit bool) {
+// §3, §4). Commands that just run SQL (.tables/.schema) go through sess,
+// the REPL's own Session; .snapshot/.overwrite/.load are DB-level
+// operations (they replace or persist the whole live database, not just
+// run a statement on it) and go through db directly.
+func handleDotCommand(db *engine.DB, sess *engine.Session, opts *options, line string) (exit bool) {
 	fields := strings.Fields(line)
 	cmd, args := fields[0], fields[1:]
 
@@ -116,9 +134,9 @@ func handleDotCommand(db *engine.DB, opts *options, line string) (exit bool) {
 	case ".help":
 		printHelp()
 	case ".tables":
-		cmdTables(db)
+		cmdTables(sess)
 	case ".schema":
-		cmdSchema(db, args)
+		cmdSchema(sess, args)
 	case ".snapshot":
 		cmdSnapshot(db, opts, args)
 	case ".overwrite":
@@ -146,8 +164,8 @@ func printHelp() {
 `)
 }
 
-func cmdTables(db *engine.DB) {
-	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+func cmdTables(sess *engine.Session) {
+	rows, err := sess.Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		return
@@ -168,15 +186,15 @@ func cmdTables(db *engine.DB) {
 	}
 }
 
-func cmdSchema(db *engine.DB, args []string) {
+func cmdSchema(sess *engine.Session, args []string) {
 	const base = `SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND `
 
 	var rows *sql.Rows
 	var err error
 	if len(args) > 0 {
-		rows, err = db.Query(base+`name = ? ORDER BY type, name`, args[0])
+		rows, err = sess.Query(base+`name = ? ORDER BY type, name`, args[0])
 	} else {
-		rows, err = db.Query(base + `name NOT LIKE 'sqlite_%' ORDER BY type, name`)
+		rows, err = sess.Query(base + `name NOT LIKE 'sqlite_%' ORDER BY type, name`)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)

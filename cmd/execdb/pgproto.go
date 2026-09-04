@@ -114,8 +114,13 @@ func cStringFromBody(body []byte) string {
 // spec §8's own choice for the access-control rejection; sqlstateGeneric
 // is this implementation's stand-in for every other backend error, since
 // phase 1 does not build a real SQLite-error-to-SQLSTATE mapping.
+// sqlstateInFailedTransaction (25P02) is real PostgreSQL's own code for
+// "current transaction is aborted" -- used as-is, not simplified, since
+// pgx/JDBC recognize it specifically (phase 2 Step 5's 'I'/'T'/'E'
+// ReadyForQuery tracking, pgwire.go).
 const (
 	sqlstateInsufficientPrivilege = "42501"
+	sqlstateInFailedTransaction   = "25P02"
 	sqlstateGeneric               = "XX000"
 )
 

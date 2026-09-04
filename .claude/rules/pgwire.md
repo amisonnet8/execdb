@@ -81,19 +81,47 @@ TCPとUNIX Domain Socketの両方に対応する。同一のプロトコル実�
   マッピングを実装するまでは、`pgx`等の型に厳格なドライバから使う場合、
   呼び出し側は数値列であっても文字列としてScanする必要がある。
 
-## 既知の制約: トランザクションの真の並行分離は未対応（フェーズ①）
+## トランザクションの真の並行分離（フェーズ②Step 5で解決）
 
-`.claude/rules/sqlite-quirks.md`が記録している通り、`engine.DB`の`Exec`/`Query`/
-`QueryRow`は単一の`keeper`コネクション経由に統一されている（`Deserialize`が
-他コネクションへ伝播しないための対処）。そのため、複数のpgwireクライアント
-（またはREPL＋pgwire）が**同時に**`BEGIN`〜`COMMIT`を実行すると、物理的には
-同じSQLiteコネクションを共有しているため、あるクライアントのトランザクション中に
-別クライアントの文が紛れ込む可能性がある（§8が要求する「コネクション単位の
-トランザクション分離」を完全には満たさない）。
+フェーズ①では`engine.DB`の`Exec`/`Query`/`QueryRow`が単一の`keeper`コネクション
+経由に統一されていたため、複数のpgwireクライアント（またはREPL＋pgwire）が
+**同時に**`BEGIN`〜`COMMIT`を実行すると、物理的には同じSQLiteコネクションを
+共有しているため、あるクライアントのトランザクション中に別クライアントの文が
+紛れ込む可能性がある、という制約があった（§8が要求する「コネクション単位の
+トランザクション分離」を満たしていなかった）。
 
-フェーズ①は「単一クライアントでの疎通・単発文の実行」を実機確認済みだが
-（REPL・pgwireの両方から同一DBを読み書きできることは確認済み）、**複数
-クライアントが同時にトランザクションを張るケースの分離は未検証・未対応**。
-真の解決（コネクションごとの分離、または明示的なロックによる直列化）は
-`PLAN.md`の「Step 2で確定した事実」に申し送り済みで、フェーズ②以降で
-`engine`のAPI設計を見直す際に対応する。
+**フェーズ②で解消済み。** `engine.Session`（`db.Session(ctx)`）が専有コネクション
+を配るようになり（Step 3）、`cmd/execdb`側もTCP/UDS**1接続につき1
+`engine.Session`**を割り当てるよう結線した（`handleConnection`、Step 5）。
+REPLも同様に1本の`Session`を張る（`runREPL`）。これにより`BEGIN`/`COMMIT`/
+`ROLLBACK`はSession固有の`*sql.Conn`上で実行され、SQLite自身のロック機構
+（`memdb` VFS、`.claude/rules/sqlite-quirks.md`参照）がクライアント間の分離を
+提供する——ExecDB独自の同時実行制御は実装していない（仕様書§2の方針通り）。
+
+`examples/pgclient`の`checkTransactionIsolation`（2接続でBEGIN/INSERT→他方から
+見えない→COMMIT→見える）で自動検証済み。ただし`memdb`の性質上、これは
+「真の非ブロック・スナップショット分離」ではなく「直列化による分離」である点に
+注意（他セッションが書き込み中の読み取りは`busy_timeout`の範囲でブロックされ、
+書き込みが確定した後の値を見る。`.claude/rules/sqlite-quirks.md`参照）。
+
+### `ReadyForQuery`のステータスバイト（`'I'`/`'T'`/`'E'`）
+
+`handleSimpleQuery`（`cmd/execdb/pgwire.go`）が接続ごとに`txState`を追跡し、
+`BEGIN`成功で`'T'`、`COMMIT`/`ROLLBACK`/`END`成功で`'I'`、`'T'`中にSQL文が
+エラーになると`'E'`に遷移する。**`'E'`中は`COMMIT`/`ROLLBACK`/`END`以外の文を
+SQLSTATE `25P02`（"current transaction is aborted"）で拒否**し、実行そのものは
+行わない（表示だけ`'E'`にして実行を通す中途半端な実装は、txStatusを厳密に見る
+pgx/JDBC等のドライバを混乱させるため採用しなかった）。`examples/pgclient`の
+`checkFailedTransactionState`で自動検証済み。
+
+### クライアント切断時のクエリキャンセル（`CancelRequest`とは別）
+
+`handleConnection`は接続ごとに`context.Context`を持ち、クエリ実行中は
+`watchForDisconnect`（`pgwire.go`）が別goroutineで`conn`への1バイトRead待ちを
+行うことで、クライアントの切断（あるいは予期しないデータ送出）を検知して
+`cancel()`する。これによりクライアントが消えた後もクエリが走り続けることを防ぐ。
+**これは真の`CancelRequest`プロトコル（別接続からの明示キャンセル要求。
+`BackendKeyData`のPID/secretで対象を特定する仕組み）とは異なる**——現状
+`BackendKeyData`は`0, 0`固定のまま（フェーズ④で対応、`PLAN.md`参照）。
+`examples/pgclient`の`checkDisconnectDuringQuery`（クエリのcontextをタイムアウト
+させてpgxに接続を諦めさせ、その後別接続がすぐに繋がることを確認）で自動検証済み。
