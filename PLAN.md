@@ -274,8 +274,37 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
-- 現在のフェーズ: **①ミニマム実装（技術検証フェーズ）完了**。次はフェーズ②
-  （`engine`ライブラリ開発）の計画立案から。
+- 現在のフェーズ: **②`engine`ライブラリ開発完了**。フェーズ③（REPL開発）の
+  計画立案・承認済み（2026-09-04）。詳細は下記「フェーズ③のステップ」節を参照。
+- **フェーズ③Step 1（REPL基盤の再構築）完了（2026-09-04）。**
+  - `cmd/execdb/access.go`: `splitStatements`から`scanStatements(sql) (complete []string,
+    remainder string)`を切り出し（`splitStatements`はremainderが非空白なら末尾へ追加する
+    薄いラッパーに変更、pgwire側の挙動は無変更）。REPLはこの`remainder`で文が完結したかを
+    判定するため、`INSERT INTO t VALUES ('a;b');`のようなリテラル内`;`での誤分割や、
+    `SELECT 1; SELECT 2;`を1行で打った際に2文目が黙って捨てられる不具合が解消した
+    （実機確認済み）。`looksLikeRowReturning`も`repl.go`から`access.go`へ移設し、
+    自前の前方一致判定をやめて`firstKeyword`ベースの実装に置き換え（コメント・
+    複数行に対応）
+  - `cmd/execdb/repl.go`: 全面書き換え。`db`/`sess`/`opts`を引き回す関数群を
+    `type repl struct { db *engine.DB; sess *engine.Session; opts *options;
+    interactive bool }`に集約し、`handleDotCommand`/`cmdTables`/`cmdSchema`/
+    `cmdSnapshot`/`cmdOverwrite`/`cmdLoad`をメソッド化。Step 2以降（出力モード・
+    Ctrl+C状態）が乗る土台として意図した変更
+  - `cmd/execdb/dotcmd.go`（新規）: `parseDotCommand`/`splitDotCommandArgs`——
+    sqlite3準拠のクォート付き引数パース（`'...'`は無エスケープでリテラル、`"..."`は
+    `\`エスケープあり、クォート外の`\`はスペースを含める用途）。`strings.Fields`では
+    扱えなかった`.import 'my data.csv' t`・`.snapshot "my db"`が通るようになった
+    （実機確認済み）
+  - **`.exit [CODE]` / `.quit [CODE]`を追加**（sqlite3準拠）。引数なしは従来どおり
+    `run()`から正常return（deferによるクリーンアップを経て終了）、引数ありは
+    `os.Exit(code)`で即座に終了する（ExecDBは終了時にフラッシュすべき状態を
+    持たないため、クリーンアップ省略は安全と判断）
+  - 新規テスト: `access_test.go`に`TestScanStatementsRemainder`・
+    `TestLooksLikeRowReturning`、`dotcmd_test.go`（新規、クォート・エスケープ・
+    不正な引用符のテーブル駆動テスト）。全PASS
+  - `make check`・`make test`（e2e、全項目PASS）とも green を確認済み。加えて
+    実機確認（`bin/execdb`直接実行）で、1行複文実行・リテラル内`;`の非分割・
+    `.exit 7`の終了コード・スペース入りファイル名への`.snapshot`を確認済み
 - 下準備として以下を作成済み（2026-09-03時点）:
   - `go.mod`（module: `github.com/amisonnet8/execdb`）
   - `LICENSE`（MIT, copyright: amisonnet8）
@@ -622,6 +651,54 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
   ドキュメント反映）を完了し、`engine`は複数の独立したクライアントを
   安全に同時に扱えるライブラリとして作り直された。次のアクションは
   フェーズ③（REPL開発）の計画立案。
+
+## フェーズ③のステップ
+
+REPL開発フェーズは、以下のステップで進める（2026-09-04、計画レビュー済み）。ゴールは
+「仕様書§3のREPLコマンド体系を宣言どおり完成させ、REPLをフェーズ①の薄い動作確認用
+ループから、sqlite3 CLIに準じた実用的な対話環境に引き上げること」。`.headers`/`.mode`/
+`.import`/`.dump`/`--snapshot-interval`が未実装のまま残っており、文の区切り判定
+（`repl.go`の`strings.HasSuffix(trimmed, ";")`）にも既知のバグ（文字列リテラル内の`;`で
+誤分割）がある。
+
+**この計画で確定した方針:**
+
+| 論点 | 決定 |
+| :--- | :--- |
+| `.mode`の範囲 | list / column / csv / json / line の5つ。box/markdown/html等の装飾系は不採用（`.claude/rules/cli-output.md`） |
+| REPLのCtrl+C | sqlite3準拠。クエリ実行中は中断のみ、アイドル時は1回目で終了しない、連続2回目で終了。非対話（パイプ）時はハンドラ登録せず従来どおり即終了 |
+| `.import`のテーブル未存在時 | sqlite3準拠で自動CREATE（全TEXT列）。フィールド数不一致は行番号付きエラーで中断・ロールバック（sqlite3との意図的な相違） |
+| スキーマ内省API | `engine`には切り出さない。`.tables`/`.schema`/`.dump`は`cmd/execdb`側の生SQLのまま |
+
+**ステップ構成:**
+
+1. **Step 1: REPL基盤の再構築** — `access.go`から`scanStatements`（remainder付き）を
+   切り出し文の区切りバグを直す、`looksLikeRowReturning`を`firstKeyword`ベースに、
+   REPL状態を`repl`構造体へ集約、`dotcmd.go`でsqlite3準拠のクォート付き引数パース、
+   `.exit [CODE]`。
+2. **Step 2: 出力フォーマット** — `.mode`（list/column/csv/json/line）・`.headers`。
+   `format.go`を全面書き換え。
+3. **Step 3: `.dump`** — スキーマ＋データをSQL文として出力。リテラル化はSQLite自身の
+   `quote()`に委譲（自前エスケープ実装はしない）。
+4. **Step 4: `.import`** — CSV読み込み、テーブル未存在時は自動CREATE、SAVEPOINTで
+   一括投入。**`engine.Session`に`Prepare`/`PrepareContext`を追加**（フェーズ③唯一の
+   engine変更）。
+5. **Step 5: `--snapshot-interval`とCtrl+C** — `-i`のティッカーgoroutine、保存経路
+   （`.snapshot`/自動保存/`-i`）の共通ヘルパー化。Ctrl+Cはsqlite3の
+   `interrupt_handler`と同じ状態機械（クエリ中断／アイドル1回目は継続／連続2回目で終了）。
+   最大リスクのステップのため最後に配置。
+6. **Step 6: 仕様書・ルール・PLANへの反映** — §3/§6/§9/§10の反映、cli-output.md
+   （出力モード・SIGINTの扱い）・naming.mdへの追記。
+
+**フェーズ③完了の判定:** `make check`/`make race`/`make test`が通る／`.mode`5種×
+`.headers`がsqlite3同等の書式／`.dump`の出力を空DBへ流し込むとラウンドトリップする／
+`.import`が自動CREATE・不一致時ロールバックを含めて動く／`-i`で定期スナップショットが
+生成される／実端末でCtrl+Cの状態機械（中断・継続・連続2回終了）が確認できる／
+GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と`.claude/rules/`が
+実装と一致している。
+
+計画の全文は `/home/vscode/.claude/plans/step-step-step-crispy-graham.md` を参照
+（セッションログにも詳細が残る）。
 
 ## フェーズ③・④への申し送り
 

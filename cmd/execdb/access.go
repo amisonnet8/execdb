@@ -9,7 +9,30 @@ import "strings"
 // external-I/F access control (spec §2) and to execute a Simple Query's
 // statements one at a time, matching real PostgreSQL's per-statement
 // response behavior for a multi-statement message.
+//
+// Any trailing text after the last top-level ";" is included as a final
+// statement if it is non-blank -- pgwire callers don't require a query to
+// end with ";" (e.g. a bare "SELECT 1" is a complete Simple Query
+// message). The REPL, which does care whether a statement is actually
+// terminated yet, uses scanStatements directly instead.
 func splitStatements(sql string) []string {
+	stmts, remainder := scanStatements(sql)
+	if strings.TrimSpace(remainder) != "" {
+		stmts = append(stmts, remainder)
+	}
+	return stmts
+}
+
+// scanStatements is splitStatements' underlying scanner, exposing the
+// distinction splitStatements collapses: complete holds every statement
+// that was terminated by a top-level ";", and remainder holds whatever
+// trailing text follows the last one (empty if the input ended exactly on
+// a ";"). The REPL (repl.go) uses remainder to decide whether a
+// statement is finished yet or more input needs to be read -- an
+// unterminated quote or comment naturally leaves everything scanned so
+// far in remainder, since the inner loops below only stop at a closing
+// quote/comment marker or end of input.
+func scanStatements(sql string) (complete []string, remainder string) {
 	var stmts []string
 	var cur strings.Builder
 
@@ -83,10 +106,21 @@ func splitStatements(sql string) []string {
 			i++
 		}
 	}
-	if strings.TrimSpace(cur.String()) != "" {
-		stmts = append(stmts, cur.String())
+	return stmts, cur.String()
+}
+
+// looksLikeRowReturning reports whether stmt is a statement that returns
+// rows (so callers should use Query/QueryContext rather than
+// Exec/ExecContext). This is a keyword check, not a real parser --
+// adequate for the REPL and pgwire's row/no-row dispatch, both of which
+// only need to pick the right database/sql method.
+func looksLikeRowReturning(stmt string) bool {
+	s := strings.TrimLeft(stmt, "( \t\r\n")
+	switch firstKeyword(s) {
+	case "SELECT", "PRAGMA", "EXPLAIN", "VALUES", "WITH":
+		return true
 	}
-	return stmts
+	return false
 }
 
 // firstKeyword returns the first SQL keyword in stmt, skipping leading

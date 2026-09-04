@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,11 +25,26 @@ func isInteractive(f *os.File) bool {
 	return stat.Mode()&os.ModeCharDevice != 0
 }
 
+// repl holds everything one REPL run needs across the lifetime of the
+// process: the DB-level handle (for .snapshot/.overwrite/.load, which
+// replace or persist the whole live database), the one Session this REPL
+// holds for its entire run (see runREPL's doc comment), and the parsed
+// startup options (for defaults like --snapshot-as/--timestamp).
+// Bundling these lets the dot-command handlers become methods instead of
+// each needing db/sess/opts threaded through as separate parameters.
+type repl struct {
+	db          *engine.DB
+	sess        *engine.Session
+	opts        *options
+	interactive bool
+}
+
 // runREPL reads SQL statements and dot-commands from stdin until EOF,
 // ".exit"/".quit", or a successful ".overwrite" (spec §3, §4). SQL text
-// accumulates across lines until a line ends with ";"; dot-commands are
-// always a single line. Query results go to stdout; prompts, banners and
-// errors go to stderr (.claude/rules/cli-output.md).
+// accumulates across lines until scanStatements (access.go) reports no
+// unterminated trailing text; dot-commands are always a single line.
+// Query results go to stdout; prompts, banners and errors go to stderr
+// (.claude/rules/cli-output.md).
 //
 // The REPL holds one engine.Session for its entire run, the same
 // independent-client model pgwire uses (spec §2/§8). This is not
@@ -44,13 +60,17 @@ func runREPL(db *engine.DB, opts *options) {
 	}
 	defer sess.Close()
 
-	interactive := isInteractive(os.Stdin)
+	r := &repl{db: db, sess: sess, opts: opts, interactive: isInteractive(os.Stdin)}
+	r.run()
+}
+
+func (r *repl) run() {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 
 	var buf strings.Builder
 	for {
-		if interactive {
+		if r.interactive {
 			if buf.Len() == 0 {
 				fmt.Fprint(os.Stderr, "execdb> ")
 			} else {
@@ -64,7 +84,7 @@ func runREPL(db *engine.DB, opts *options) {
 		trimmed := strings.TrimSpace(line)
 
 		if buf.Len() == 0 && strings.HasPrefix(trimmed, ".") {
-			if handleDotCommand(db, sess, opts, trimmed) {
+			if r.handleDotCommand(trimmed) {
 				return
 			}
 			continue
@@ -75,26 +95,37 @@ func runREPL(db *engine.DB, opts *options) {
 
 		buf.WriteString(line)
 		buf.WriteString("\n")
-		if strings.HasSuffix(trimmed, ";") {
-			execSQL(sess, buf.String())
-			buf.Reset()
+
+		// scanStatements (access.go), not a bare ";" suffix check: it
+		// understands string/identifier literals and comments, so a ";"
+		// inside a literal (or a whole statement typed across several
+		// lines) does not falsely end -- or falsely fail to end -- the
+		// buffered input. remainder is only whitespace once every
+		// statement typed so far is properly terminated.
+		complete, remainder := scanStatements(buf.String())
+		if strings.TrimSpace(remainder) != "" {
+			continue
 		}
+		for _, stmt := range complete {
+			r.execSQL(stmt)
+		}
+		buf.Reset()
 	}
 	if err := scanner.Err(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 	}
 }
 
-// execSQL runs one accumulated SQL statement, choosing Query over Exec
-// for statements that return rows. This is a simple keyword check, not a
-// real parser -- adequate for phase 1's minimal REPL.
-func execSQL(sess *engine.Session, stmt string) {
+// execSQL runs one statement, choosing Query over Exec for statements
+// that return rows (access.go's looksLikeRowReturning, shared with
+// pgwire's own dispatch).
+func (r *repl) execSQL(stmt string) {
 	trimmed := strings.TrimSpace(stmt)
 	if trimmed == "" {
 		return
 	}
 	if looksLikeRowReturning(trimmed) {
-		rows, err := sess.Query(stmt)
+		rows, err := r.sess.Query(stmt)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 			return
@@ -103,46 +134,41 @@ func execSQL(sess *engine.Session, stmt string) {
 		printRows(rows)
 		return
 	}
-	if _, err := sess.Exec(stmt); err != nil {
+	if _, err := r.sess.Exec(stmt); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 	}
 }
 
-func looksLikeRowReturning(stmt string) bool {
-	upper := strings.ToUpper(strings.TrimLeft(stmt, "( \t\r\n"))
-	for _, kw := range []string{"SELECT", "PRAGMA", "EXPLAIN", "VALUES", "WITH"} {
-		if strings.HasPrefix(upper, kw) {
-			return true
-		}
-	}
-	return false
-}
-
 // handleDotCommand runs one dot-command and reports whether the REPL
-// should now exit (".exit"/".quit", or a successful ".overwrite" -- spec
-// §3, §4). Commands that just run SQL (.tables/.schema) go through sess,
-// the REPL's own Session; .snapshot/.overwrite/.load are DB-level
-// operations (they replace or persist the whole live database, not just
-// run a statement on it) and go through db directly.
-func handleDotCommand(db *engine.DB, sess *engine.Session, opts *options, line string) (exit bool) {
-	fields := strings.Fields(line)
-	cmd, args := fields[0], fields[1:]
+// should now exit (".exit"/".quit" with no code, or a successful
+// ".overwrite" -- spec §3, §4; ".exit CODE"/".quit CODE" terminate the
+// process directly instead, see cmdExit). Commands that just run SQL
+// (.tables/.schema) go through r.sess, the REPL's own Session;
+// .snapshot/.overwrite/.load are DB-level operations (they replace or
+// persist the whole live database, not just run a statement on it) and
+// go through r.db directly.
+func (r *repl) handleDotCommand(line string) (exit bool) {
+	cmd, args, err := parseDotCommand(line)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		return false
+	}
 
 	switch cmd {
 	case ".exit", ".quit":
-		return true
+		return r.cmdExit(args)
 	case ".help":
 		printHelp()
 	case ".tables":
-		cmdTables(sess)
+		r.cmdTables()
 	case ".schema":
-		cmdSchema(sess, args)
+		r.cmdSchema(args)
 	case ".snapshot":
-		cmdSnapshot(db, opts, args)
+		r.cmdSnapshot(args)
 	case ".overwrite":
-		return cmdOverwrite(db)
+		return r.cmdOverwrite()
 	case ".load":
-		cmdLoad(db, args)
+		r.cmdLoad(args)
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown command %q. Enter \".help\" for usage hints.\n", cmd)
 	}
@@ -150,8 +176,8 @@ func handleDotCommand(db *engine.DB, sess *engine.Session, opts *options, line s
 }
 
 func printHelp() {
-	fmt.Fprint(os.Stderr, `.exit                     Exit this program
-.quit                     Exit this program (same as .exit)
+	fmt.Fprint(os.Stderr, `.exit [CODE]              Exit this program
+.quit [CODE]              Exit this program (same as .exit)
 .help                     Show this message
 .tables                   List names of tables
 .schema [TABLE]           Show CREATE statements
@@ -164,8 +190,28 @@ func printHelp() {
 `)
 }
 
-func cmdTables(sess *engine.Session) {
-	rows, err := sess.Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+// cmdExit implements ".exit"/".quit" (spec §3). With no argument it
+// reports exit=true so run()'s caller unwinds normally (letting
+// deferred cleanup -- Session.Close, DB.Close, stopPgwire -- run before
+// the process exits 0). With an argument, sqlite3's own ".exit CODE"
+// terminates the process immediately with that code instead, skipping
+// further cleanup; ExecDB has nothing that must flush on exit (§1/§4:
+// no automatic saving), so this is safe here too.
+func (r *repl) cmdExit(args []string) (exit bool) {
+	if len(args) == 0 {
+		return true
+	}
+	code, err := strconv.Atoi(args[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid exit code %q\n", args[0])
+		return false
+	}
+	os.Exit(code)
+	return true // unreachable
+}
+
+func (r *repl) cmdTables() {
+	rows, err := r.sess.Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		return
@@ -186,15 +232,15 @@ func cmdTables(sess *engine.Session) {
 	}
 }
 
-func cmdSchema(sess *engine.Session, args []string) {
+func (r *repl) cmdSchema(args []string) {
 	const base = `SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND `
 
 	var rows *sql.Rows
 	var err error
 	if len(args) > 0 {
-		rows, err = sess.Query(base+`name = ? ORDER BY type, name`, args[0])
+		rows, err = r.sess.Query(base+`name = ? ORDER BY type, name`, args[0])
 	} else {
-		rows, err = sess.Query(base + `name NOT LIKE 'sqlite_%' ORDER BY type, name`)
+		rows, err = r.sess.Query(base + `name NOT LIKE 'sqlite_%' ORDER BY type, name`)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
@@ -212,9 +258,9 @@ func cmdSchema(sess *engine.Session, args []string) {
 	}
 }
 
-func cmdSnapshot(db *engine.DB, opts *options, args []string) {
+func (r *repl) cmdSnapshot(args []string) {
 	filename := ""
-	withTimestamp := opts.timestamp
+	withTimestamp := r.opts.timestamp
 	for _, a := range args {
 		if a == "--timestamp" {
 			withTimestamp = true
@@ -223,22 +269,22 @@ func cmdSnapshot(db *engine.DB, opts *options, args []string) {
 		}
 	}
 	if filename == "" {
-		filename = opts.snapshotAs
+		filename = r.opts.snapshotAs
 	}
 	if filename == "" {
 		filename = defaultSnapshotBase()
 	}
 
 	path := snapshotFilename(filename, withTimestamp, time.Now(), runtime.GOOS)
-	if err := db.Snapshot(path); err != nil {
+	if err := r.db.Snapshot(path); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		return
 	}
 	fmt.Fprintf(os.Stderr, "Wrote %s\n", path)
 }
 
-func cmdOverwrite(db *engine.DB) bool {
-	if err := db.Overwrite(); err != nil {
+func (r *repl) cmdOverwrite() bool {
+	if err := r.db.Overwrite(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		return false
 	}
@@ -246,7 +292,7 @@ func cmdOverwrite(db *engine.DB) bool {
 	return true
 }
 
-func cmdLoad(db *engine.DB, args []string) {
+func (r *repl) cmdLoad(args []string) {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "Usage: .load FILENAME")
 		return
@@ -259,7 +305,7 @@ func cmdLoad(db *engine.DB, args []string) {
 		fmt.Fprintf(os.Stderr, "Warning: %s has ExecDB format version %d; this build is version %d.\n", path, info.Version, engine.FormatVersion)
 	}
 
-	if err := db.Load(path); err != nil {
+	if err := r.db.Load(path); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		return
 	}

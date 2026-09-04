@@ -104,6 +104,68 @@ func TestSplitStatements(t *testing.T) {
 	}
 }
 
+func TestScanStatementsRemainder(t *testing.T) {
+	cases := []struct {
+		in           string
+		wantComplete []string
+		wantRemain   string
+	}{
+		{"SELECT 1", nil, "SELECT 1"},
+		{"SELECT 1;", []string{"SELECT 1"}, ""},
+		{"SELECT 1; SELECT 2", []string{"SELECT 1"}, " SELECT 2"},
+		{"SELECT 1;SELECT 2;", []string{"SELECT 1", "SELECT 2"}, ""},
+		{"SELECT ';';", []string{"SELECT ';'"}, ""},
+		{"", nil, ""},
+		{"-- comment\n", nil, "-- comment\n"},
+		{"/* unterminated", nil, "/* unterminated"},
+	}
+	for _, c := range cases {
+		gotComplete, gotRemain := scanStatements(c.in)
+		if len(gotComplete) != len(c.wantComplete) {
+			t.Fatalf("scanStatements(%q) complete = %v, want %v", c.in, gotComplete, c.wantComplete)
+		}
+		for i := range gotComplete {
+			if gotComplete[i] != c.wantComplete[i] {
+				t.Errorf("scanStatements(%q) complete[%d] = %q, want %q", c.in, i, gotComplete[i], c.wantComplete[i])
+			}
+		}
+		if gotRemain != c.wantRemain {
+			t.Errorf("scanStatements(%q) remainder = %q, want %q", c.in, gotRemain, c.wantRemain)
+		}
+	}
+}
+
+func TestLooksLikeRowReturning(t *testing.T) {
+	rowReturning := []string{
+		"SELECT 1",
+		"  select * from t",
+		"PRAGMA table_info(t)",
+		"EXPLAIN SELECT 1",
+		"VALUES (1)",
+		"WITH x AS (SELECT 1) SELECT * FROM x",
+		"-- comment\nSELECT 1",
+		"(SELECT 1)",
+	}
+	for _, stmt := range rowReturning {
+		if !looksLikeRowReturning(stmt) {
+			t.Errorf("looksLikeRowReturning(%q) = false, want true", stmt)
+		}
+	}
+
+	notRowReturning := []string{
+		"INSERT INTO t VALUES (1)",
+		"UPDATE t SET a = 1",
+		"DELETE FROM t",
+		"CREATE TABLE t(a)",
+		"BEGIN",
+	}
+	for _, stmt := range notRowReturning {
+		if looksLikeRowReturning(stmt) {
+			t.Errorf("looksLikeRowReturning(%q) = true, want false", stmt)
+		}
+	}
+}
+
 func TestFirstKeywordSkipsLeadingComments(t *testing.T) {
 	cases := map[string]string{
 		"SELECT 1":                 "SELECT",
