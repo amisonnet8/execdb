@@ -521,7 +521,33 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
   - `make check`（`CGO_ENABLED=0`）・`go test -race ./...`
     （`CGO_ENABLED=1`）・`make test`（e2e、cmd/execdb結線は未変更ながら
     engine内部の大幅変更の影響確認のため実行）とも green を確認済み
-- 次のアクション: フェーズ②Step 4（並行性テストと`-race`の常設化）に着手する。
+- **フェーズ②Step 4（並行性テストと`-race`の常設化）完了（2026-09-04）。**
+  - `engine/concurrency_test.go`（新規）: `TestConcurrentSessionsReadWrite`
+    （8並行`Session`×20行、最終行数一致を確認）／
+    `TestUncommittedWriteIsInvisibleToOtherSession`（Step 1④の本番版、
+    4並行リーダーに拡張）／`TestConcurrentWriteConflictIsHandledByBusyTimeout`
+    （Step 1⑤の本番版、busy_timeoutで実際に待たされたことを経過時間で検証）／
+    `TestSnapshotDuringConcurrentWritesProducesConsistentImage`
+    （書き込みループ中に5回`Snapshot`し、各出力を`Open`して
+    `PRAGMA integrity_check`が`ok`）／`TestLoadDuringConcurrentReads`
+    （読み取りループ中に`Load`しても読み取り側がエラーにならず、
+    `Load`後は新データが見えることを確認）。`-race`で10回連続実行し
+    flakinessなしを確認済み
+  - `Makefile`: `race:`ターゲット追加（`CGO_ENABLED=1 go test -race -count=1
+    ./...`）。**`check`には含めない**（`PostToolUse`フック経由の速度を保つ
+    ため）。`check-deps`を再定義: ①`engine`が`net`/`net/http`を直接import
+    しないこと（現行維持）②`go list -deps ./engine`に`net/http`が現れない
+    こと（推移的依存の`net`自体は`modernc.org/libc`→`google/uuid`経由で
+    解消不能なため対象外。仕様書§6の文言修正はStep 6で対応）
+  - `.github/workflows/test.yml`: `race`ジョブを新設
+    （`ubuntu-latest`/`macos-latest`限定。`-race`はcgoを要求し、
+    windows-latestには標準でCコンパイラが無いため対象外）
+  - `.claude/rules/testing.md`: `-race`の運用方針（`make race`を`check`と
+    分離した理由、CIでWindowsを対象外にした理由）を追記
+  - `make check`・`make race`・`make test`（e2e）とも green を確認済み
+- 次のアクション: フェーズ②Step 5（`cmd/execdb`結線: pgwire 1接続=1
+  `Session`化、REPLのSession化、`ReadyForQuery`の`'I'/'T'/'E'`、
+  クライアント切断時のクエリキャンセル）に着手する。
 
 ## 保留事項
 

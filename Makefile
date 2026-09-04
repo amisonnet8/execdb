@@ -5,7 +5,7 @@ BUILD_FLAGS := -trimpath
 LDFLAGS     := -s -w -X main.version=$(VERSION)
 
 .DEFAULT_GOAL := help
-.PHONY: help build run unit e2e test fmt fmt-check vet lint check check-deps tidy clean
+.PHONY: help build run unit e2e test race fmt fmt-check vet lint check check-deps tidy clean
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z0-9_-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/'
@@ -24,6 +24,9 @@ e2e: build ## Run end-to-end checks in examples/
 
 test: unit e2e ## unit + e2e (this is what .claude/rules/testing.md refers to)
 
+race: ## Run all tests with the race detector (requires cgo; not part of `check`)
+	CGO_ENABLED=1 go test -race -count=1 ./...
+
 fmt: ## Format sources in place
 	gofmt -s -w .
 
@@ -40,9 +43,11 @@ vet: ## go vet
 lint: ## staticcheck (skipped if not installed)
 	@command -v staticcheck >/dev/null && staticcheck ./... || echo "staticcheck not installed; skipped"
 
-check-deps: ## Enforce spec §6: engine must not import net directly
+check-deps: ## Enforce spec §6: engine must not import net/net-http, directly or transitively
 	@if go list -f '{{join .Imports "\n"}}' ./engine | grep -qx 'net\|net/http'; then \
-		echo "ERROR: engine must not depend on net (see execdb_spec.md §6)"; exit 1; fi
+		echo "ERROR: engine must not directly import net (see execdb_spec.md §6)"; exit 1; fi
+	@if go list -deps ./engine | grep -qx 'net/http'; then \
+		echo "ERROR: engine must not depend on net/http, even transitively (see execdb_spec.md §6)"; exit 1; fi
 
 tidy: ## go mod tidy and fail if it changed anything
 	go mod tidy

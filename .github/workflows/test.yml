@@ -33,6 +33,28 @@ jobs:
         run: make check
         shell: bash
 
+  race:
+    # -race requires cgo (a C compiler). ubuntu-latest/macos-latest ship
+    # one preinstalled; windows-latest does not have MinGW by default, so
+    # it is intentionally excluded here rather than added to `check`'s
+    # matrix (.claude/rules/testing.md).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: make race
+        run: make race
+        shell: bash
+
   trivy:
     runs-on: ubuntu-latest
     steps:

@@ -96,3 +96,27 @@
   （`GOOS=windows`への単純なクロスビルドではこの種の実行時アサーション
   の誤りは検出できず、実際にWindowsランナー上で`go test`を走らせて
   初めて発覚する）。
+
+## `-race`の運用方針（フェーズ②Step 4）
+
+`engine`が`Session`（専有コネクション）を複数の独立したクライアントに配る
+設計（フェーズ②）になったことで、並行性のバグは`-race`で継続的に検出したい。
+一方で`-race`はcgo（Cコンパイラ）を要求するため、`.claude/rules/binary-size.md`
+・`directory-structure.md`が前提とする「本体はpure Go・`CGO_ENABLED=0`」という
+方針とは別枠で扱う。
+
+- **`make race`（`CGO_ENABLED=1 go test -race -count=1 ./...`）を新設し、
+  `make check`には含めない。** `check`はコミット前に素早く回す用途
+  （`PostToolUse`フックからも自動実行される）なので、cgoビルド分の速度低下
+  ・追加の外部依存（Cコンパイラ）を持ち込まない。
+- **GitHub Actionsでは`race`を`check`とは別ジョブにし、
+  `ubuntu-latest`/`macos-latest`限定で実行する。** `-race`にはCコンパイラが
+  要る。ubuntu/macosのホステッドランナーにはgcc/clangがプリインストール
+  済みだが、**windows-latestにはMinGW等のCコンパイラが標準では入っていない**
+  ため、`windows-latest`をこのジョブの対象から外す。`check`ジョブの
+  Windows対応（`choco install make`相当）に加えてCコンパイラまで用意する
+  コストは、フェーズ②時点では見合わないと判断した。
+- 開発者の手元環境（devcontainer、`CGO_ENABLED=0`）で`-race`を試す場合は、
+  そのコマンド呼び出しだけ`CGO_ENABLED=1`を明示的に指定する必要がある
+  （`make race`は自動でこれを行う）。手元にgcc等のCコンパイラが入っている
+  ことが前提（本プロジェクトのdevcontainerには標準で入っている）。
