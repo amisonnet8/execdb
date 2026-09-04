@@ -37,6 +37,8 @@ type repl struct {
 	sess        *engine.Session
 	opts        *options
 	interactive bool
+	mode        outputMode // .mode (format.go); zero value behaves as modeList
+	headers     bool       // .headers
 }
 
 // runREPL reads SQL statements and dot-commands from stdin until EOF,
@@ -60,7 +62,7 @@ func runREPL(db *engine.DB, opts *options) {
 	}
 	defer sess.Close()
 
-	r := &repl{db: db, sess: sess, opts: opts, interactive: isInteractive(os.Stdin)}
+	r := &repl{db: db, sess: sess, opts: opts, interactive: isInteractive(os.Stdin), mode: modeList}
 	r.run()
 }
 
@@ -131,7 +133,7 @@ func (r *repl) execSQL(stmt string) {
 			return
 		}
 		defer rows.Close()
-		printRows(rows)
+		r.printRows(rows)
 		return
 	}
 	if _, err := r.sess.Exec(stmt); err != nil {
@@ -159,6 +161,10 @@ func (r *repl) handleDotCommand(line string) (exit bool) {
 		return r.cmdExit(args)
 	case ".help":
 		printHelp()
+	case ".mode":
+		r.cmdMode(args)
+	case ".headers":
+		r.cmdHeaders(args)
 	case ".tables":
 		r.cmdTables()
 	case ".schema":
@@ -179,6 +185,8 @@ func printHelp() {
 	fmt.Fprint(os.Stderr, `.exit [CODE]              Exit this program
 .quit [CODE]              Exit this program (same as .exit)
 .help                     Show this message
+.mode MODE                Set output mode: list|column|csv|json|line
+.headers on|off           Show column names in output
 .tables                   List names of tables
 .schema [TABLE]           Show CREATE statements
 .snapshot [FILE] [--timestamp]
@@ -255,6 +263,42 @@ func (r *repl) cmdSchema(args []string) {
 			return
 		}
 		fmt.Println(sqlText + ";")
+	}
+}
+
+// cmdMode implements ".mode MODE" (spec §3). Switching into column mode
+// turns headers on automatically, matching sqlite3 -- a bare table of
+// values with no header row is a lot less useful in column mode, where
+// the whole point is readable alignment. headers can still be turned
+// back off explicitly afterward.
+func (r *repl) cmdMode(args []string) {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "Usage: .mode MODE (list|column|csv|json|line)")
+		return
+	}
+	mode := outputMode(strings.ToLower(args[0]))
+	if !validOutputModes[mode] {
+		fmt.Fprintf(os.Stderr, "Error: unknown mode %q. Available modes: list, column, csv, json, line.\n", args[0])
+		return
+	}
+	r.mode = mode
+	if mode == modeColumn {
+		r.headers = true
+	}
+}
+
+func (r *repl) cmdHeaders(args []string) {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "Usage: .headers on|off")
+		return
+	}
+	switch strings.ToLower(args[0]) {
+	case "on":
+		r.headers = true
+	case "off":
+		r.headers = false
+	default:
+		fmt.Fprintf(os.Stderr, "Error: expected \"on\" or \"off\", got %q\n", args[0])
 	}
 }
 

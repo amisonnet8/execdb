@@ -305,6 +305,31 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
   - `make check`・`make test`（e2e、全項目PASS）とも green を確認済み。加えて
     実機確認（`bin/execdb`直接実行）で、1行複文実行・リテラル内`;`の非分割・
     `.exit 7`の終了コード・スペース入りファイル名への`.snapshot`を確認済み
+- **フェーズ③Step 2（出力フォーマット `.mode`/`.headers`）完了（2026-09-04）。**
+  - `cmd/execdb/format.go`: 全面書き換え。`outputMode`型（`list`/`column`/`csv`/
+    `json`/`line`の5種、box/markdown/html等の装飾系は`.claude/rules/cli-output.md`
+    に従い不採用）。`repl.printRows`がモードごとのレンダラへディスパッチ
+    （`printRowsList`/`printRowsCSV`/`printRowsLine`/`(r *repl) printRowsColumn`/
+    `printRowsJSON`）。`column`モードのみ列幅算出のため全行をバッファリング
+    （ExecDBはそもそもインメモリDB・約1GiB上限なので許容と判断）。`csv`は
+    `encoding/csv`＋`UseCRLF=true`でsqlite3同様CRLF。`json`はキー順序を保つため
+    `map[string]any`を経由せず手組み。**BLOB（`[]byte`型として判別——実測で
+    TEXT列は`string`、BLOB列は`[]byte`として`database/sql`から返ることを確認
+    済み）はjsonモードでのみ16進エンコード**（生バイト列をJSON文字列へ直接
+    埋め込むと`encoding/json`が不正UTF-8をU+FFFDへ静かに置換しデータを壊す
+    ため。list/csv/line/columnの各モードでは従来どおり生バイト列をそのまま
+    文字列化——フェーズ①からの挙動を維持）。pgwire用の`formatValue`は既存の
+    シグネチャのまま維持（外部I/Fは常にテキスト形式でOID型マッピングは
+    フェーズ④）
+  - `cmd/execdb/repl.go`: `repl`構造体に`mode outputMode`・`headers bool`
+    フィールドを追加。`.mode MODE`・`.headers on|off`ドットコマンドを追加。
+    **`.mode column`へ切り替えるとsqlite3同様`headers`が自動でonになる**
+    （その後`.headers off`で個別に無効化可能）。`.help`にも追記
+  - 新規テスト`format_test.go`: `captureStdout`/`captureStderr`ヘルパーで
+    NULL・引用符入り文字列・BLOB・整数・実数を含む1つのフィクスチャに対し
+    5モード×ヘッダ有無のゴールデンテストを実施、全PASS
+  - `make check`・`make test`（e2e、全項目PASS）とも green を確認済み。
+    実機確認（`bin/execdb`直接実行）で全5モードの出力を確認済み
 - 下準備として以下を作成済み（2026-09-03時点）:
   - `go.mod`（module: `github.com/amisonnet8/execdb`）
   - `LICENSE`（MIT, copyright: amisonnet8）
