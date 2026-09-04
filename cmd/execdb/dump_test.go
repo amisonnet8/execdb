@@ -62,7 +62,7 @@ func TestDumpRoundTrip(t *testing.T) {
 	// correctly treated the ";" inside the trigger's BEGIN...END body as
 	// internal to that one CREATE TRIGGER statement. This test validates
 	// .dump's SQL text itself, independent of how it gets fed to SQLite
-	// -- examples/e2e.sh separately exercises piping a dump containing a
+	// -- tests/e2e.sh separately exercises piping a dump containing a
 	// TRIGGER into a fresh REPL's stdin, which needs completeStatements
 	// (complete.go, phase 3 Step 4) to work at all.
 	if _, err := target.Exec(dump); err != nil {

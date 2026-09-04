@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# examples/e2e.sh -- end-to-end checks for `make test` (.claude/rules/testing.md).
+# tests/e2e.sh -- end-to-end checks for `make test` (.claude/rules/testing.md).
 #
 # Exercises the REPL, .snapshot/.load/.overwrite, pgwire (TCP+UDS), a real
-# Go driver (examples/pgclient, pgx), and `go install`, against the
+# Go driver (tests/pgclient, pgx), and `go install`, against the
 # binary at bin/execdb (built by `make build`, which this script assumes
 # has already run -- see the "e2e" Makefile target).
 #
@@ -237,7 +237,7 @@ pass ".overwrite: persists data into the running executable and cleans up its si
 # --- pgwire over TCP: psql SELECT, DDL rejected, multi-statement bypass rejected (spec §8) ---
 # Starts from snap1 (already has table t(a INTEGER), seeded above) rather
 # than a blank binary: DDL is rejected via the external I/F (spec §2), so
-# examples/pgclient's transaction-isolation/failed-tx-state checks below
+# tests/pgclient's transaction-isolation/failed-tx-state checks below
 # need a table that already exists.
 cp "$WORK/snap1" "$WORK/pgtcp"
 chmod +x "$WORK/pgtcp"
@@ -263,13 +263,13 @@ echo "$bypass_out" | grep -q 'not allowed via external interface' \
   || fail "pgwire TCP: the DROP hidden after a SELECT was not rejected (got: $bypass_out)"
 pass "pgwire TCP: multi-statement DDL bypass rejected"
 
-# --- examples/pgclient (pgx v5): a second, independent driver implementation ---
+# --- tests/pgclient (pgx v5): a second, independent driver implementation ---
 # default_query_exec_mode=simple_protocol is required: pgx defaults to the
 # extended query protocol, which ExecDB does not implement in phase 1
 # (.claude/rules/pgwire.md).
-go run "$ROOT/examples/pgclient" "postgres://any@127.0.0.1:15532/any?sslmode=disable&default_query_exec_mode=simple_protocol" \
-  || fail "examples/pgclient (pgx) checks failed"
-pass "pgwire TCP: examples/pgclient (pgx) SELECT/NULL/DDL-rejection checks"
+go run "$ROOT/tests/pgclient" "postgres://any@127.0.0.1:15532/any?sslmode=disable&default_query_exec_mode=simple_protocol" \
+  || fail "tests/pgclient (pgx) checks failed"
+pass "pgwire TCP: tests/pgclient (pgx) SELECT/NULL/DDL-rejection checks"
 
 stop_server "$pid"
 

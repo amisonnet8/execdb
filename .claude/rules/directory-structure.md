@@ -24,7 +24,7 @@ execdb/
 │   └── rules/
 ├── engine/                 ← 【ライブラリ本体】インメモリSQLエンジン
 ├── cmd/execdb/             ← 【アプリ】engineを利用した単一バイナリRDBMSの実装
-├── examples/                ← 動作確認用のサンプル（`make test` で実行される）
+├── tests/                    ← `make test` が実行するE2E/結合テスト一式
 ├── tour/                     ← 入門ガイド（実装完了後に作成予定）
 └── .github/workflows/       ← CI定義（test.yml, release.yml 等）
 ```
@@ -50,7 +50,9 @@ execdb/
 - **.vscode/**: エディタ設定（推奨拡張機能等、チームで共有したい設定のみ）。
 - **tour/**: 実装が完了してから作成する入門ガイド。実装フェーズ（①〜④、
   `PLAN.md`参照）の途中では着手しない。
-- **examples/**: `.claude/rules/testing.md` の `make test` から参照される
-  動作確認用サンプル。
+- **tests/**: `.claude/rules/testing.md` の `make test` が実行するE2E/結合
+  テスト一式（`e2e.sh`、他言語ドライバ確認用の `pgclient` 等）。ユーザー向けの
+  使い方サンプルではなく、テスト専用のディレクトリと位置づける（ユーザー向け
+  サンプルをどう用意するかは、フェーズ④完了後にあらためて検討する）。
 - **配布物（各OS向けビルド済みバイナリ）**: リポジトリに直接コミットしない
   （詳細は `.claude/rules/distribution.md` 参照）。

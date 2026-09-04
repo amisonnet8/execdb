@@ -19,8 +19,8 @@ run: build ## Build and start the REPL
 unit: ## Run Go unit tests
 	go test ./...
 
-e2e: build ## Run end-to-end checks in examples/
-	bash examples/e2e.sh
+e2e: build ## Run end-to-end checks in tests/
+	bash tests/e2e.sh
 
 test: unit e2e ## unit + e2e (this is what .claude/rules/testing.md refers to)
 

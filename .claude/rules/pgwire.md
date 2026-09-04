@@ -74,7 +74,7 @@ TCPとUNIX Domain Socketの両方に対応する。同一のプロトコル実�
   指定しないと`conn.QueryRow`等の初回呼び出しで`unsupported message type
   'P'`エラーになる。接続文字列に`default_query_exec_mode=simple_protocol`
   を付与すると、`pgx`はSimple Queryのみを使うようになり接続できる
-  （`examples/pgclient`のusageメッセージ・`examples/e2e.sh`参照）。`psql`は
+  （`tests/pgclient`のusageメッセージ・`tests/e2e.sh`参照）。`psql`は
   デフォルトでSimple Queryを使うため、この問題は`psql`では顕在化しない
   ——つまり「`psql`で繋がった」だけでは他ドライバの互換性を保証しない、
   という教訓でもある。フェーズ④で他ドライバ確認する際は、まずデフォルト
@@ -106,7 +106,7 @@ REPLも同様に1本の`Session`を張る（`runREPL`）。これにより`BEGIN
 （`memdb` VFS、`.claude/rules/sqlite-quirks.md`参照）がクライアント間の分離を
 提供する——ExecDB独自の同時実行制御は実装していない（仕様書§2の方針通り）。
 
-`examples/pgclient`の`checkTransactionIsolation`（2接続でBEGIN/INSERT→他方から
+`tests/pgclient`の`checkTransactionIsolation`（2接続でBEGIN/INSERT→他方から
 見えない→COMMIT→見える）で自動検証済み。ただし`memdb`の性質上、これは
 「真の非ブロック・スナップショット分離」ではなく「直列化による分離」である点に
 注意（他セッションが書き込み中の読み取りは`busy_timeout`の範囲でブロックされ、
@@ -119,7 +119,7 @@ REPLも同様に1本の`Session`を張る（`runREPL`）。これにより`BEGIN
 エラーになると`'E'`に遷移する。**`'E'`中は`COMMIT`/`ROLLBACK`/`END`以外の文を
 SQLSTATE `25P02`（"current transaction is aborted"）で拒否**し、実行そのものは
 行わない（表示だけ`'E'`にして実行を通す中途半端な実装は、txStatusを厳密に見る
-pgx/JDBC等のドライバを混乱させるため採用しなかった）。`examples/pgclient`の
+pgx/JDBC等のドライバを混乱させるため採用しなかった）。`tests/pgclient`の
 `checkFailedTransactionState`で自動検証済み。
 
 ### クライアント切断時のクエリキャンセル（`CancelRequest`とは別）
@@ -131,5 +131,5 @@ pgx/JDBC等のドライバを混乱させるため採用しなかった）。`ex
 **これは真の`CancelRequest`プロトコル（別接続からの明示キャンセル要求。
 `BackendKeyData`のPID/secretで対象を特定する仕組み）とは異なる**——現状
 `BackendKeyData`は`0, 0`固定のまま（フェーズ④で対応、`PLAN.md`参照）。
-`examples/pgclient`の`checkDisconnectDuringQuery`（クエリのcontextをタイムアウト
+`tests/pgclient`の`checkDisconnectDuringQuery`（クエリのcontextをタイムアウト
 させてpgxに接続を諦めさせ、その後別接続がすぐに繋がることを確認）で自動検証済み。

@@ -1,7 +1,7 @@
 // Command pgclient is a small pgx-based connectivity check for ExecDB's
 // PostgreSQL wire protocol implementation (spec §8). It exists to satisfy
 // the phase 1 requirement of testing with a Go driver in addition to
-// psql (PLAN.md). It lives under examples/ specifically so pgx
+// psql (PLAN.md). It lives under tests/ specifically so pgx
 // (github.com/jackc/pgx/v5) never becomes a dependency of cmd/execdb's
 // shipped binary (.claude/rules/binary-size.md): go.mod lists it, but
 // nothing in cmd/execdb imports it, so it is never linked into
@@ -92,7 +92,7 @@ func run(connString string) error {
 	// The checks below need an actual writable table, which DDL rejection
 	// above proves pgclient cannot create over the wire -- the caller is
 	// expected to have started ExecDB from a snapshot that already has a
-	// table named "t" with an INTEGER column "a" (examples/e2e.sh does
+	// table named "t" with an INTEGER column "a" (tests/e2e.sh does
 	// this, reusing the snapshot from its own .snapshot check).
 	if err := checkTransactionIsolation(ctx, connString); err != nil {
 		return fmt.Errorf("transaction isolation: %w", err)

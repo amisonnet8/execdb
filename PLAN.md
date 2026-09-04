@@ -42,7 +42,7 @@ Windows/macOSや複数CPUアーキテクチャでの動作確認（GitHub Action
    サブセットのみ）。型マッピングは全列text暫定。ATTACH/PRAGMA/VACUUM等も
    DDLと同様に拒否。
 5. **Step 5: E2E自動化・他言語ドライバ確認・CI・ドキュメント更新** —
-   `examples/e2e.sh`、`examples/pgclient`（pgx、examples専用依存）、
+   `tests/e2e.sh`、`tests/pgclient`（pgx、tests専用依存）、
    `psql`での疎通確認、GitHub Actions 3OSマトリクス、仕様書・ルールファイル
    への確定事項の反映。
 
@@ -72,7 +72,7 @@ Windows/macOSや複数CPUアーキテクチャでの動作確認（GitHub Action
 既存pgwireセッション維持、`ExecContext`/`QueryContext`、`Begin`/`BeginTx`。
 
 **フェーズ①完了の判定:** `make check`・`make test`が通る／`psql`と
-`examples/pgclient`（pgx）の両方から疎通しDDL系が42501で拒否される／
+`tests/pgclient`（pgx）の両方から疎通しDDL系が42501で拒否される／
 GitHub Actions 3OSマトリクスがgreen（Windowsでの`.overwrite`含む）／
 `go install`で入れたバイナリでも`.snapshot`/`.overwrite`が機能する。
 
@@ -155,7 +155,7 @@ DSN（`file:execdb?mode=memory&cache=shared`）を使っていても、`Deserial
 
 | 論点 | 決定 |
 | :--- | :--- |
-| `cmd/execdb`の結線 | フェーズ②に含める。pgwire/REPLをSession APIに載せ替え、2クライアント同時`BEGIN`が混線しないことを`examples/pgclient`で自動検証するところまで |
+| `cmd/execdb`の結線 | フェーズ②に含める。pgwire/REPLをSession APIに載せ替え、2クライアント同時`BEGIN`が混線しないことを`tests/pgclient`で自動検証するところまで |
 | クエリキャンセルの範囲 | 接続切断のみ。`CancelRequest`/`BackendKeyData`レジストリはフェーズ④へ送る |
 | スキーマ内省API | フェーズ③へ送る。②では`ColumnTypes()`の実測記録のみ |
 
@@ -175,12 +175,12 @@ DSN（`file:execdb?mode=memory&cache=shared`）を使っていても、`Deserial
    `Makefile`の`race`ターゲット、CI（ubuntu/macos限定の別ジョブ、Windowsは対象外）。
 5. **Step 5: `cmd/execdb`結線** — pgwireを1接続=1`Session`化、REPLもSession化
    （必須。N-7のため）、`ReadyForQuery`の`'I'/'T'/'E'`と`25P02`、クライアント切断時の
-   クエリキャンセル。`examples/pgclient`拡張でトランザクション分離をGo側から自動検証。
+   クエリキャンセル。`tests/pgclient`拡張でトランザクション分離をGo側から自動検証。
 6. **Step 6: 仕様書・ルール・PLANへの反映** — §2/§4/§6/§7/§8の乖離修正、
    naming.md／sqlite-quirks.md／pgwire.md／testing.mdへの追記。
 
 **フェーズ②完了の判定:** `make check`/`make race`/`make test`が通る／2つのpgwire
-クライアントが同時`BEGIN`〜`COMMIT`で混線しない（`examples/pgclient`で自動検証）／
+クライアントが同時`BEGIN`〜`COMMIT`で混線しない（`tests/pgclient`で自動検証）／
 pgwireセッション維持中に`.load`が成功しセッション側が新データを見られる／長いクエリ
 実行中の切断でキャンセルされる／`ReadyForQuery`が`'I'/'T'/'E'`を正しく返す／
 GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と`.claude/rules/`が
@@ -546,7 +546,7 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
   - `LICENSE`（MIT, copyright: amisonnet8）
   - `.gitignore`
   - `README.md` / `README_ja.md`
-  - `examples/README.md`（用途の説明のみ、中身は未整備）
+  - `tests/README.md`（用途の説明のみ、中身は未整備）
 - Step 1で以下を実施済み（2026-09-04時点）:
   - `modernc.org/sqlite v1.58.0` を取得、`go.sum`確定。`trivy fs --scanners
     license,vuln .` でCVE・GPL系混入なしを確認済み
@@ -641,15 +641,15 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
     分離は未対応（`engine.DB`が単一keeperコネクション経由のため）という
     既知の制約
 - Step 5で以下を実施済み（2026-09-04時点）:
-  - `examples/pgclient/main.go`（pgx v5。`SELECT 1`/`SELECT 'hello'`/
+  - `tests/pgclient/main.go`（pgx v5。`SELECT 1`/`SELECT 'hello'`/
     `SELECT NULL`の読み取りと、DDL拒否時に`*pgconn.PgError`として
-    SQLSTATE 42501が正しく届くことを検証。examples専用の依存として
+    SQLSTATE 42501が正しく届くことを検証。tests専用の依存として
     `go.mod`に追加、`cmd/execdb`の依存グラフには含まれないことを
     `go list -deps ./cmd/execdb | grep jackc`で確認済み）
-  - `examples/e2e.sh`（`make test`の実体）: REPLのCRUD、`.snapshot`→
+  - `tests/e2e.sh`（`make test`の実体）: REPLのCRUD、`.snapshot`→
     単体起動、`.load`、`.overwrite`（コピーに対して実行）、pgwire TCP
     （`psql`のSELECT・DDL/ATTACH拒否・複文バイパス拒否）、
-    `examples/pgclient`実行、pgwire UDS、`go install`後のフッター/
+    `tests/pgclient`実行、pgwire UDS、`go install`後のフッター/
     `.overwrite`動作まで、すべて自動化・全PASS
   - **e2e.sh実装中に発覚した重要な事実（`.claude/rules/pgwire.md`・
     `testing.md`へ追記済み）**:
@@ -704,7 +704,7 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
   - **3回目のpush後、ubuntu/macos/windowsの`make check`・`trivy`
     すべてgreenになったことを確認済み（2026-09-04）。**
 - **フェーズ①完了の判定（PLAN.md記載の基準、すべて満たした）**:
-  `make check`・`make test`が通る／`psql`と`examples/pgclient`（pgx）の
+  `make check`・`make test`が通る／`psql`と`tests/pgclient`（pgx）の
   両方から疎通しDDL系が拒否される／`go install`で入れたバイナリでも
   `.snapshot`/`.overwrite`が機能する／GitHub Actions
   3OSマトリクス・trivyジョブとも実際にgreen。**全項目達成、フェーズ①
@@ -751,7 +751,7 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
     `TestUseAfterCloseReturnsErrClosed`/`TestSnapshotToRoundTrip`/
     `TestOverwriteSelfLeavesOriginalIntactOnFailure`）を追加。全24テストPASS
   - `make check`（`CGO_ENABLED=0`）・`go test -race ./...`（`CGO_ENABLED=1`）・
-    `make test`（`examples/e2e.sh`——REPL・`.snapshot`・`.load`・`.overwrite`・
+    `make test`（`tests/e2e.sh`——REPL・`.snapshot`・`.load`・`.overwrite`・
     pgwire TCP/UDS・`go install`まで全チェック）とも green を確認済み。
     依存追加なし（`go.mod`/`go.sum`変更なし、trivy不要）
 - **フェーズ②Step 3（`Session`とcontext API）完了（2026-09-04）。**
@@ -831,14 +831,14 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
     `.snapshot`/`.overwrite`/`.load`はDBレベル操作なので`db`経由のまま
     （必須の変更——`ResetSession`がロールバックしないため、素朴に
     `db.Exec`のままだとREPLの`BEGIN`が壊れる。N-7）
-  - `examples/pgclient/main.go`: `checkTransactionIsolation`（2接続で
+  - `tests/pgclient/main.go`: `checkTransactionIsolation`（2接続で
     BEGIN/INSERT→他方から見えない→COMMIT→見える。`memdb`の直列化特性を
     踏まえgoroutine+boundedな待ちで検証）／`checkFailedTransactionState`
     （tx中にエラー→次の文が25P02→ROLLBACKで復帰）／
     `checkDisconnectDuringQuery`（クエリのcontextをタイムアウトさせて
     pgxに接続を諦めさせ、直後の別接続がすぐ繋がることでサーバーが
     居座っていないことを確認）を追加
-  - `examples/e2e.sh`: pgtcpサーバーを空バイナリではなくテーブル入りの
+  - `tests/e2e.sh`: pgtcpサーバーを空バイナリではなくテーブル入りの
     `snap1`スナップショットから起動するよう変更（DDLは外部I/F経由で
     拒否されるため、pgclientの新規チェックにはテーブルが最初から必要）。
     FIFO経由でREPLへ`.load`を送りつつ、1本のpsqlセッション（heredoc＋
