@@ -313,4 +313,8 @@ DSN（`file:execdb?mode=memory&cache=shared`）を使っていても、`Deserial
 
 ## 保留事項
 
-（なし。CIのgreen化を含め、フェーズ①のすべての完了条件を達成済み。）
+- **devcontainer.json反映待ちリスト**: 現行コンテナはリビルドせずに開発を
+  進める方針（都度手動でインストール・設定して進め、フェーズ④完了時に
+  まとめて `devcontainer.json` へ反映する）。session内で手動インストール・
+  設定を行った場合は、忘れずにここへ追記すること。
+  - （なし）
