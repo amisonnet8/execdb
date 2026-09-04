@@ -130,6 +130,65 @@ DSN（`file:execdb?mode=memory&cache=shared`）を使っていても、`Deserial
   現時点（フェーズ①）では1の方針（`engine.DB`のAPI経由に統一）で問題なく、
   2は将来的に真の並行アクセス性能が必要になった場合の拡張候補として保留する。
 
+## フェーズ②のステップ
+
+`engine`ライブラリ開発フェーズは、以下のステップで進める（2026-09-04、計画レビュー済み）。
+ゴールは「`engine`を複数の独立したクライアントを安全に同時に扱えるライブラリに作り直し、
+それが実際に機能することをe2eで実証すること」（§2/§8の中核要件がフェーズ①では未達の
+まま完了していたため）。
+
+**計画時に判明した新事実（`modernc.org/sqlite v1.58.0`のソースを直接確認）:**
+
+| # | 事実 |
+| :-- | :--- |
+| N-1 | オンラインBackup API（`NewBackup`/`NewRestore`/`Backup.Step`/`Finish`）が公開されている。`Raw()`＋ローカルinterfaceで到達可能 |
+| N-2 | `Deserialize`が伝播しない理由が判明: 内部で匿名（名前なし）memdbストアとして開き直すため。DSNを変えても直らない設計上の必然 |
+| N-3 | memdb VFSが使える（`file:/name?vfs=memdb`）。名前が`/`始まりならグローバルにストアを共有 |
+| N-4 | memdbはshared-cacheと異なりSHARED/RESERVED/EXCLUSIVEロック＋busy handlerが効く（`_busy_timeout`が機能する） |
+| N-5 | `Serialize()`はトランザクションを考慮しない。他セッションが未コミットtx中に呼ぶと壊れたイメージを出力しうる |
+| N-6 | `Serialize()`は`(nil, nil)`を返しうる（巨大DBでのmalloc失敗時） |
+| N-7 | `ResetSession`はトランザクションをロールバックしない → プール経由APIで`BEGIN`を投げてはいけない |
+| N-8 | `ColumnTypeScanType`は存在するが現在行依存（`Next()`前は不定）。フェーズ④の型マッピングの要 |
+| N-9 | memdbの実効サイズ上限は1GiB。仕様書§7の「2GB未満」は不正確 |
+
+**この計画で確定した方針:**
+
+| 論点 | 決定 |
+| :--- | :--- |
+| `cmd/execdb`の結線 | フェーズ②に含める。pgwire/REPLをSession APIに載せ替え、2クライアント同時`BEGIN`が混線しないことを`examples/pgclient`で自動検証するところまで |
+| クエリキャンセルの範囲 | 接続切断のみ。`CancelRequest`/`BackendKeyData`レジストリはフェーズ④へ送る |
+| スキーマ内省API | フェーズ③へ送る。②では`ColumnTypes()`の実測記録のみ |
+
+**ステップ構成:**
+
+1. **Step 1: スパイク【意思決定ゲート】** — `engine/session_spike_test.go`で
+   backup APIによるコネクション分離モデル（第一候補memdb VFS、第二候補shared-cache）を
+   実測（①③④⑥⑧が全PASSする基盤を採用）。ダメならフォールバックF1（`engine`側で
+   直列化。公開APIはF1でも同一に保つ）。
+2. **Step 2: 基盤置き換え** — DSN・backup経由の`Open`/`Load`・ロック再設計
+   （`db.mu`はメタデータ専用と再定義）・`Snapshot`/`Overwrite`のシリアライズバリア・
+   typed errors・空blobガード・`Close`冪等化。
+3. **Step 3: `Session`とcontext API** — `engine/session.go`新設、`ExecContext`等の
+   export、`LoadFrom(io.Reader)`。`Begin`/`BeginTx`/`TxStatus`は意図的に追加しない
+   （SQL文としての`BEGIN`をSessionの専有接続にそのまま流す設計）。
+4. **Step 4: 並行性テストと`-race`常設化** — `engine/concurrency_test.go`、
+   `Makefile`の`race`ターゲット、CI（ubuntu/macos限定の別ジョブ、Windowsは対象外）。
+5. **Step 5: `cmd/execdb`結線** — pgwireを1接続=1`Session`化、REPLもSession化
+   （必須。N-7のため）、`ReadyForQuery`の`'I'/'T'/'E'`と`25P02`、クライアント切断時の
+   クエリキャンセル。`examples/pgclient`拡張でトランザクション分離をGo側から自動検証。
+6. **Step 6: 仕様書・ルール・PLANへの反映** — §2/§4/§6/§7/§8の乖離修正、
+   naming.md／sqlite-quirks.md／pgwire.md／testing.mdへの追記。
+
+**フェーズ②完了の判定:** `make check`/`make race`/`make test`が通る／2つのpgwire
+クライアントが同時`BEGIN`〜`COMMIT`で混線しない（`examples/pgclient`で自動検証）／
+pgwireセッション維持中に`.load`が成功しセッション側が新データを見られる／長いクエリ
+実行中の切断でキャンセルされる／`ReadyForQuery`が`'I'/'T'/'E'`を正しく返す／
+GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と`.claude/rules/`が
+実装と一致している。
+
+計画の全文は `/home/vscode/.claude/plans/step-step-step-crispy-graham.md` を参照
+（セッションログにも詳細が残る）。
+
 ## 現在地
 
 *（このセクションは実装が進むにつれて更新すること。「今どのフェーズの、
@@ -306,10 +365,9 @@ DSN（`file:execdb?mode=memory&cache=shared`）を使っていても、`Deserial
   `.snapshot`/`.overwrite`が機能する／GitHub Actions
   3OSマトリクス・trivyジョブとも実際にgreen。**全項目達成、フェーズ①
   完全完了。**
-- 次のアクション: フェーズ②（`engine`ライブラリ開発）の計画を立てる。
-  着手前に、Step 2/4で申し送った既知の制約（複数クライアント同時
-  トランザクションの真の分離が`engine.DB`の単一keeperコネクション設計
-  では未対応な点）への対応方針を含めて設計を検討すること。
+- **フェーズ②（`engine`ライブラリ開発）の計画立案・承認済み（2026-09-04）。**
+  詳細は上記「フェーズ②のステップ」節を参照。
+- 次のアクション: フェーズ②Step 1（スパイク・意思決定ゲート）に着手する。
 
 ## 保留事項
 
