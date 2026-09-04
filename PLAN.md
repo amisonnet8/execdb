@@ -189,6 +189,85 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
 計画の全文は `/home/vscode/.claude/plans/step-step-step-crispy-graham.md` を参照
 （セッションログにも詳細が残る）。
 
+## フェーズ②Step 1で確定した事実（コネクション分離モデル、2026-09-04実測）
+
+`engine/session_spike_test.go`（`go test ./engine/ -run TestSpike -v -race`、
+`CGO_ENABLED=1`必須——`-race`はcgoを要求するため。通常の`make check`は
+`CGO_ENABLED=0`のまま問題なく通る）で、計画時の候補2基盤を実測。
+
+**決定: `memdb` VFS（`file:/name?vfs=memdb&_busy_timeout=N`）を採用。
+`cache=shared`インメモリDSNは不採用（後述する致命的な欠陥のため）。**
+
+### ゲート結果
+
+| # | テスト | memdb | sharedcache |
+| :-- | :--- | :--- | :--- |
+| ① | Backupで生きたDBへ反映 | PASS | PASS |
+| ③ | 他セッションtx中のbackup | PASS（BUSYで拒否） | PASS（LOCKED_SHAREDCACHEで即拒否） |
+| ④ | セッション間tx分離 | PASS（busy_timeout分だけ待ってBUSY） | **FAIL（無制限ハング）** |
+| ⑥ | 未コミットtx中のSerializeバリア | PASS（barrier系） | **FAIL（barrier自体が無制限ハング）** |
+| ⑧ | contextキャンセル | PASS | PASS |
+
+①③④⑥⑧が全てPASSしたのは`memdb`のみ。`sharedcache`は④⑥で失格。
+
+### 決定的だった発見: `sharedcache`は「読み取りが無制限・キャンセル不能にハングする」
+
+計画時点でN-4として「shared-cacheはbusy handlerが呼ばれない」と記録していたが、
+実測するとこれは**「エラーが早く返る」ではなく「本当に無限に待つ」**という、
+想定より遥かに深刻な欠陥だった。
+
+- `modernc.org/sqlite`は共有キャッシュのテーブルロック衝突
+  （`SQLITE_LOCKED_SHAREDCACHE`、拡張コード262）に対して、
+  `sqlite3_unlock_notify`ベースの独自リトライ機構（`conn.go`の`retry()`）を
+  実装している。この待機は生の`sync.Mutex.Lock()`であり、
+  **`context.Context`のキャンセルも、DSNの`_busy_timeout`も一切見ない**。
+  相手のトランザクションが未来永劫コミット/ロールバックされなければ、
+  文字通り無限に待ち続ける。
+- 素朴な単一ゴルーチンでの検証コード（`/tmp/waltest.go`、セッションログ参照）
+  ではGoランタイム自身の「all goroutines are asleep」デッドロック検出が
+  発火してプロセスごと落ちた。spikeテストでは、この危険な呼び出しを
+  バックグラウンドgoroutine＋`select`+`time.After`（`spikeRunHardBounded`
+  ヘルパー）で包み、メインのテストgoroutineを実行可能な状態に保つことで
+  安全にハングを検出・記録できるようにした。
+- 対照的に`memdb`の同じ衝突は**通常のSQLite内蔵busy-handler**を経由し、
+  `_busy_timeout`が正しく効く（設定した秒数だけ待ってから`SQLITE_BUSY`で
+  諦める、という有界な挙動を実測で確認）。`modernc.org/sqlite`のソース
+  （`_memdbLock`、`lib/sqlite.go`）を読むと、`memdb`の書き込みロック
+  （`FnWrLock`）は新規`SHARED`ロック取得もブロックする、という
+  ファイルベースDBより粗い（が、有界で安全な）ロック粒度であることも判明
+  （通常のロールバックジャーナルなら`SHARED`と`RESERVED`は共存できるが、
+  `memdb`はより単純化された実装のため、新規読み取りも書き込み中は
+  `_busy_timeout`の間だけ待たされる）。
+
+### その他の実測結果
+
+- **`journal_mode=WAL`はどちらの基盤でも効かない**（`PRAGMA journal_mode=WAL`
+  実行後も`memory`のまま）。インメモリDB向けのWAL（真のMVCC、読み書き非
+  ブロック）という第三の道は存在しない。
+- **`Serialize()`は未コミットtx中に呼ぶと、`memdb`では明示的なエラー
+  （`invalid length returned: -1`）を返す**（N-5で懸念した「壊れたイメージを
+  静かに返す」ではなく、エラーで弾かれる、というより安全側の結果だった）。
+  一方`sharedcache`では実際に未コミット行が漏れて`Serialize()`されることを
+  確認（`integrity_check`は`ok`のまま、つまり壊れてはいないが一貫性のない
+  スナップショットになる）。`BEGIN IMMEDIATE`バリアを噛ませれば、両基盤とも
+  他セッションのtx中は正しく拒否され、コミット後は正しく確定データのみを
+  含むスナップショットが取れることを確認（Step 2で採用するバリア設計の
+  正しさを裏付け）。
+- **`ColumnTypes()`は`Next()`呼び出し前でも正しい`DatabaseTypeName`/
+  `ScanType`を返す**（N-8で懸念した「`Next()`前は不定」は杞憂だった。
+  `INTEGER`/`REAL`/`TEXT`/`BLOB`/`NUMERIC`列、および式列（`dbType`は空文字、
+  `scanType`は`int64`）を実測。フェーズ④の型マッピング設計にそのまま使える）。
+- **`memdb`の実効サイズ上限は約960MiB付近で`SQLITE_FULL`**（"database or
+  disk is full"）。`SQLITE_MEMDB_DEFAULT_MAXSIZE`（1GiB）に近い値で
+  頭打ちになることを確認（N-9の裏付け）。対照的に`sharedcache`は1.1GiB超でも
+  エラーにならず、`memdb`特有の制約であることが分かった
+  （仕様書§7の「2GB未満」を「約1GiB」に訂正する必要がある）。
+- `engine/session_spike_test.go`は決定ゲートの記録として残すが、
+  `sharedcache`のハング検出箇所は`t.Errorf`ではなく`t.Logf`に変更した
+  （採否は既に確定したため、以後の`make check`／CIを恒常的に赤くする
+  必要はない。フェーズ①の`serialize_spike_test.go`と同様、後続ステップで
+  整理・追加テストへの切り出しを行う想定）。
+
 ## 現在地
 
 *（このセクションは実装が進むにつれて更新すること。「今どのフェーズの、
@@ -367,7 +446,14 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
   完全完了。**
 - **フェーズ②（`engine`ライブラリ開発）の計画立案・承認済み（2026-09-04）。**
   詳細は上記「フェーズ②のステップ」節を参照。
-- 次のアクション: フェーズ②Step 1（スパイク・意思決定ゲート）に着手する。
+- **フェーズ②Step 1（スパイク・意思決定ゲート）完了（2026-09-04）。**
+  `engine/session_spike_test.go`で`memdb`/`sharedcache`の両基盤を実測し、
+  **`memdb` VFSを採用、`sharedcache`は不採用**と確定。詳細は上記
+  「フェーズ②Step 1で確定した事実」節を参照。`make check`（`CGO_ENABLED=0`）
+  ・`go test -race`（`CGO_ENABLED=1`）ともに green を確認済み。
+- 次のアクション: フェーズ②Step 2（基盤置き換え: DSN・backup経由の
+  `Open`/`Load`・ロック再設計・`Snapshot`/`Overwrite`のシリアライズバリア・
+  typed errors）に着手する。
 
 ## 保留事項
 
