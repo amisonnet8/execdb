@@ -295,28 +295,22 @@ DSN（`file:execdb?mode=memory&cache=shared`）を使っていても、`Deserial
     `cmd/execdb`側の責務であり`engine`の`Snapshot`が制御すべき事柄
     ではない、というnaming.mdの役割分担とも整合）。`GOOS=windows`への
     クロスビルド・`go vet`は事前にローカルで確認できることを確認済み
-    （実行結果の差異はcrossビルドでは検出できないため、この種の
-    plat form依存アサーションの誤りは実際にCIで走らせないと発覚し
+    （実行結果の差異はクロスビルドでは検出できないため、この種の
+    platform依存アサーションの誤りは実際にCIで走らせないと発覚し
     なかった）。
-  - **まだ3回目のpush後にgreenになったことは未確認**（次回pushする
-    機会に確認すること）。
+  - **3回目のpush後、ubuntu/macos/windowsの`make check`・`trivy`
+    すべてgreenになったことを確認済み（2026-09-04）。**
 - **フェーズ①完了の判定（PLAN.md記載の基準、すべて満たした）**:
   `make check`・`make test`が通る／`psql`と`examples/pgclient`（pgx）の
   両方から疎通しDDL系が拒否される／`go install`で入れたバイナリでも
-  `.snapshot`/`.overwrite`が機能する（3点確認済み）。GitHub Actions
-  3OSマトリクスは追加し、これまでに発覚した不具合（Windows fmt-check・
-  trivyタグ・Windowsのchmodアサーション）を修正済みだが、再push後に
-  実際に3OSとも・trivyともgreenになることは未確認。
-- 次のアクション: 修正をpushしてCIが全ジョブgreenになることを確認する。
-  その後、フェーズ②（`engine`ライブラリ開発）の計画を立てる。着手前に、
-  Step 2/4で申し送った既知の制約（複数クライアント同時トランザクションの
-  真の分離が`engine.DB`の単一keeperコネクション設計では未対応な点）への
-  対応方針を含めて設計を検討すること。
+  `.snapshot`/`.overwrite`が機能する／GitHub Actions
+  3OSマトリクス・trivyジョブとも実際にgreen。**全項目達成、フェーズ①
+  完全完了。**
+- 次のアクション: フェーズ②（`engine`ライブラリ開発）の計画を立てる。
+  着手前に、Step 2/4で申し送った既知の制約（複数クライアント同時
+  トランザクションの真の分離が`engine.DB`の単一keeperコネクション設計
+  では未対応な点）への対応方針を含めて設計を検討すること。
 
 ## 保留事項
 
-- **GitHub Actions CIのgreen確認**: `fmt-check`のWindows対応・
-  `.gitattributes`追加・trivyタグ修正・Windowsのchmodアサーション修正を
-  行ったが、修正後に再pushして実際に3OS（特にWindows）・trivyジョブとも
-  greenになることはまだ未確認。次回pushするタイミングで確認し、問題が
-  あれば追加修正すること。
+（なし。CIのgreen化を含め、フェーズ①のすべての完了条件を達成済み。）
