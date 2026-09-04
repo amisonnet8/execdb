@@ -24,3 +24,10 @@ go.work.sum
 # file (see execdb_spec.md §7) if the process is killed mid-cleanup.
 *.execdb_old
 /execdb_poc
+
+# tests/drivers: runtimes/dependencies fetched on demand, not committed
+# (.claude/rules/distribution.md's no-committed-binaries principle extends
+# here -- see tests/drivers/README.md).
+/tests/drivers/node/node_modules/
+/tests/drivers/java/lib/
+/tests/drivers/java/out/

@@ -10,8 +10,8 @@ Npgsql/pgx等）がそのまま接続できることを狙っている。
 | :--- | :--- |
 | 認証ハンドシェイク（デフォルト`trust`相当、`--user`指定時のみcleartext password） | SCRAM/MD5等の認証方式 |
 | Simple Query プロトコル（`Query`メッセージ） | `COPY`系プロトコル、LISTEN/NOTIFY |
-| Extended Query プロトコル（`Parse`/`Bind`/`Describe`/`Execute`/`Sync`/`Close`/`Flush`） | バイナリ形式のパラメータ（Bindの値側。テキストのみ） |
-| 結果値のバイナリ形式（`int8`/`float8`/`bool`/`bytea`/`timestamp`の5型のみ。下記参照） | NUMERICのバイナリ形式（base-10000桁グループの複雑な符号化。実装しない——後述） |
+| Extended Query プロトコル（`Parse`/`Bind`/`Describe`/`Execute`/`Sync`/`Close`/`Flush`） | NUMERICのバイナリ形式（base-10000桁グループの複雑な符号化。実装しない——後述） |
+| 結果値・パラメータ値双方のバイナリ形式（`int2`/`int4`/`int8`/`float4`/`float8`/`bool`/`bytea`/`timestamp`。下記参照） | ─ |
 | `RowDescription`/`DataRow`/`CommandComplete` | 行数制限付き実行・`PortalSuspended`（`Execute`のmaxRowsは無視） |
 | エラー応答（`ErrorResponse`） | 詳細なSQLSTATEコード体系（簡略化したコードで代用） |
 
@@ -35,6 +35,40 @@ Npgsql/pgx等）がそのまま接続できることを狙っている。
 （int64/float64）で`int8`/`float8`へ振り分けることで、`pgx`がそもそも
 NUMERIC OIDに対してバイナリを要求する状況自体を発生させない設計にした
 （詳細は`cmd/execdb/pgtype.go`の`columnOID`/`affinityOID`のdocコメント参照）。
+
+**パラメータ側のバイナリ形式が必要になった経緯（フェーズ④Step 7、実機確認で判明）:**
+Step 5では「パラメータは常にテキスト」という前提で、`Bind`がバイナリ形式の
+パラメータを送ってきたら一律`ErrorResponse`で拒否する実装にしていた
+（`pgx`/`psycopg`はデフォルトでパラメータをテキスト送信するため、この時点の
+実機確認では問題が出なかった）。ところがStep 7で他言語ドライバ（pgJDBC）を
+実際に繋いで検証したところ、`PreparedStatement.setInt`/`setDouble`等を
+デフォルト設定のまま使うだけで、`Bind`のパラメータがバイナリ形式で送られてくる
+ことが判明した（`binary-format parameters are not supported`で全滅）。
+
+**原因の特定に手間取った点:** `ParameterDescription`は常にOID 0
+（unspecified）を返す実装のままだったため、「サーバー側がどう答えているか」を
+見ている限り、クライアントがなぜバイナリを選ぶのか説明がつかなかった。
+`handleParse`（`pgextended.go`）が`Parse`メッセージ自身のパラメータ型OID配列
+（`paramOIDs`）を読み捨てていたのが盲点で、一時的なデバッグ出力で`Parse`の
+生の中身を見て初めて、**pgJDBCが`Parse`の時点で自ら`OID 23`（int4）を
+申告しており、`ParameterDescription`の応答内容とは無関係にその自己申告した
+型に基づいてバインド形式（テキスト/バイナリ）を決めている**ことが分かった
+（real PostgreSQLでも同様——クライアントが型を分かっているなら`Parse`で
+教えてよい、というプロトコル本来の使い方）。
+
+**対処:** `Parse`が申告した`paramOIDs`を`preparedStatement`に保持し、
+`Bind`でバイナリ形式のパラメータが来たら、そのOIDを手がかりに
+`decodeBinaryParam`（`pgtype.go`）でデコードする設計に変更した。対応OIDは
+結果値側（`binaryCapableOIDs`）より広く、`int2`/`int4`/`float4`を含む8種——
+`columnOID`は列の型としてこれらを一度も返さないが（SQLiteのINTEGER
+アフィニティは常に`int8`へ、REALは常に`float8`へ寄せる設計）、**クライアントが
+自ら申告する“パラメータ”の型としては、この決め打ちとは無関係に現実に出現する**
+ため、結果値側とパラメータ側でOIDの取り扱い range を独立に考える必要がある、
+というのがこの発見の一般化できる教訓。クライアントが型OIDを申告せず
+（`Parse`のOIDが0のまま、または省略）にバイナリで送ってきた場合は、
+デコードのしようがないため従来通り拒否する（`ParameterDescription`が0を
+返す設計をやめたわけではない——「サーバーが何を答えたか」と「クライアントが
+何を自己申告したか」は別物、という整理が今回の核心）。
 
 ## 型マッピング
 

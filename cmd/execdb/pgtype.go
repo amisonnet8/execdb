@@ -21,7 +21,10 @@ const (
 	oidBool      uint32 = 16
 	oidBytea     uint32 = 17
 	oidInt8      uint32 = 20
+	oidInt2      uint32 = 21
+	oidInt4      uint32 = 23
 	oidText      uint32 = 25
+	oidFloat4    uint32 = 700
 	oidFloat8    uint32 = 701
 	oidTimestamp uint32 = 1114
 	oidNumeric   uint32 = 1700
@@ -261,6 +264,67 @@ func encodeBinaryBool(v bool) []byte {
 		return []byte{1}
 	}
 	return []byte{0}
+}
+
+// decodeBinaryParam decodes a Bind message's binary-format parameter value
+// (phase 4 Step 7, PLAN.md) into a Go value database/sql accepts for a
+// SQLite "$N" placeholder, based on oid -- the type the client's own Parse
+// message declared for that parameter (preparedStatement.paramOIDs), since
+// Bind's wire format carries no type tag of its own. Reports ok == false
+// for oid 0 (unspecified: a well-behaved client only sends binary for a
+// type it has itself declared) or any oid with no decoder below, or a
+// length that does not match oid's fixed binary width.
+//
+// int2/int4 are included even though ExecDB's own result-side type mapping
+// (columnOID) never advertises them (an INTEGER-affinity SQLite column
+// always maps to oidInt8) -- a client's bind *parameter* has no such
+// constraint, and pgJDBC was found (real connection testing, phase 4
+// Step 7) to declare OID 23 (int4) by default for a plain
+// PreparedStatement.setInt, independent of the column it will eventually
+// be compared against or inserted into.
+func decodeBinaryParam(oid uint32, data []byte) (value any, ok bool) {
+	switch oid {
+	case oidInt2:
+		if len(data) != 2 {
+			return nil, false
+		}
+		return int64(int16(binary.BigEndian.Uint16(data))), true
+	case oidInt4:
+		if len(data) != 4 {
+			return nil, false
+		}
+		return int64(int32(binary.BigEndian.Uint32(data))), true
+	case oidInt8:
+		if len(data) != 8 {
+			return nil, false
+		}
+		return int64(binary.BigEndian.Uint64(data)), true
+	case oidFloat4:
+		if len(data) != 4 {
+			return nil, false
+		}
+		return float64(math.Float32frombits(binary.BigEndian.Uint32(data))), true
+	case oidFloat8:
+		if len(data) != 8 {
+			return nil, false
+		}
+		return math.Float64frombits(binary.BigEndian.Uint64(data)), true
+	case oidBool:
+		if len(data) != 1 {
+			return nil, false
+		}
+		return data[0] != 0, true
+	case oidBytea:
+		return append([]byte(nil), data...), true
+	case oidTimestamp:
+		if len(data) != 8 {
+			return nil, false
+		}
+		micros := int64(binary.BigEndian.Uint64(data))
+		return pgEpoch.Add(time.Duration(micros) * time.Microsecond), true
+	default:
+		return nil, false
+	}
 }
 
 // pgEpoch is PostgreSQL's own epoch for binary timestamp encoding

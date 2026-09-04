@@ -221,6 +221,25 @@ func sendParse(t *testing.T, w io.Writer, name, query string) {
 	}
 }
 
+// sendParseWithOIDs is sendParse plus an explicit parameter-type-OID list,
+// for tests that need a client to declare real types the way pgJDBC does
+// (TestExtendedQueryAcceptsBinaryFormatParametersWithDeclaredOID below) --
+// sendParse always sends zero parameter types, which is fine for every
+// other test since handleParse never uses them beyond storing them.
+func sendParseWithOIDs(t *testing.T, w io.Writer, name, query string, oids []uint32) {
+	t.Helper()
+	if err := writeMessage(w, 'P', func(b *msgBuilder) {
+		b.cstring(name)
+		b.cstring(query)
+		b.int16(int16(len(oids)))
+		for _, oid := range oids {
+			b.int32(int32(oid))
+		}
+	}); err != nil {
+		t.Errorf("send Parse: %v", err)
+	}
+}
+
 func sendBind(t *testing.T, w io.Writer, portal, stmt string, values []string, nulls []bool) {
 	t.Helper()
 	if err := writeMessage(w, 'B', func(b *msgBuilder) {
@@ -522,6 +541,15 @@ func TestExtendedQueryCloseRemovesStatement(t *testing.T) {
 	expectMessage(t, client, 'Z')
 }
 
+// TestExtendedQueryRejectsBinaryFormatParameters checks the case
+// decodeBinaryParam (pgtype.go) cannot possibly handle: a client that
+// Binds a parameter in binary format without having declared any type for
+// it in Parse (sendParse always sends zero parameter types), leaving
+// handleBind with OID 0 (unspecified) and no way to know how to decode the
+// bytes. This is now a narrower case than the name suggests -- a client
+// that DOES declare a real OID in Parse can Bind that parameter in binary,
+// see TestExtendedQueryAcceptsBinaryFormatParametersWithDeclaredOID below
+// (phase 4 Step 7, PLAN.md).
 func TestExtendedQueryRejectsBinaryFormatParameters(t *testing.T) {
 	db := extendedQueryFixture(t)
 	client, stop := startExtendedQueryConn(t, db)
@@ -554,5 +582,55 @@ func TestExtendedQueryRejectsBinaryFormatParameters(t *testing.T) {
 	if !bytes.Contains(errMsg.Body, []byte("binary")) {
 		t.Errorf("expected an error mentioning binary format, got %q", errMsg.Body)
 	}
+	expectMessage(t, client, 'Z')
+}
+
+// TestExtendedQueryAcceptsBinaryFormatParametersWithDeclaredOID is the
+// regression test for a real interoperability bug phase 4 Step 7 found via
+// actual pgJDBC connection testing (PLAN.md's "フェーズ④Step 7" notes): a
+// client's own Parse message can declare a concrete parameter type OID --
+// pgJDBC does this by default for a plain PreparedStatement.setInt,
+// declaring OID 23 (int4) -- and then Bind that parameter in binary
+// format, entirely independent of what ParameterDescription answered back
+// (which always advertises 0/unspecified, handleDescribe). Before this
+// step, ExecDB rejected every binary-format parameter outright, which made
+// prepared statements unusable from pgJDBC's own default configuration.
+func TestExtendedQueryAcceptsBinaryFormatParametersWithDeclaredOID(t *testing.T) {
+	db := extendedQueryFixture(t)
+	client, stop := startExtendedQueryConn(t, db)
+	defer stop()
+
+	sendPipelined(func() {
+		sendParseWithOIDs(t, client, "s1", "SELECT b FROM t WHERE a = $1", []uint32{oidInt4})
+		sendSync(t, client)
+	})
+	expectMessage(t, client, '1') // ParseComplete
+	expectMessage(t, client, 'Z')
+
+	sendPipelined(func() {
+		if err := writeMessage(client, 'B', func(b *msgBuilder) {
+			b.cstring("p1")
+			b.cstring("s1")
+			b.int16(1)                // one format code
+			b.int16(1)                // binary
+			b.int16(1)                // 1 param
+			b.int32(4)                // int4 is 4 bytes wide
+			b.raw([]byte{0, 0, 0, 1}) // big-endian int4 value 1
+			b.int16(0)                // result formats: text
+		}); err != nil {
+			t.Errorf("send Bind: %v", err)
+		}
+		sendDescribe(t, client, 'P', "p1")
+		sendExecute(t, client, "p1")
+		sendSync(t, client)
+	})
+
+	expectMessage(t, client, '2') // BindComplete
+	expectMessage(t, client, 'T') // RowDescription
+	dr := expectMessage(t, client, 'D')
+	if !bytes.Contains(dr.Body, []byte("x")) {
+		t.Errorf("expected the row for a=1 (b='x'), got %q", dr.Body)
+	}
+	expectMessage(t, client, 'C') // CommandComplete
 	expectMessage(t, client, 'Z')
 }

@@ -21,6 +21,20 @@ type preparedStatement struct {
 	stmt         *sql.Stmt
 	numParams    int
 	rowReturning bool
+
+	// paramOIDs is whatever type OIDs the client's own Parse message
+	// declared for its parameters (phase 4 Step 7, PLAN.md): a client is
+	// free to leave these unspecified (0, or simply omit trailing
+	// entries), in which case ParameterDescription echoes 0 back and the
+	// client is expected to send text. But a client that already knows
+	// its own intended types (pgJDBC does, from the setInt/setDouble/etc.
+	// call made before Parse is ever sent) declares the real OID here --
+	// and, critically, uses that same self-declared OID to decide
+	// whether to Bind the value in binary format, independent of
+	// whatever ParameterDescription said. handleBind needs this to
+	// decode a binary-format parameter at all, since Bind's own wire
+	// format carries no type information of its own.
+	paramOIDs []uint32
 }
 
 // portal is a Bind'd preparedStatement: a specific set of parameter values
@@ -72,7 +86,7 @@ func (eq *extendedQueryConn) closeAll() {
 // SQLite accepts Postgres-style "$1"/"$2" placeholders natively (phase 4
 // Step 1's spike), so query needs no rewriting before being prepared.
 func handleParse(ctx context.Context, w io.Writer, sess *engine.Session, eq *extendedQueryConn, body []byte) (ok bool, err error) {
-	name, query, _, parsed := parseParseMessage(body)
+	name, query, paramOIDs, parsed := parseParseMessage(body)
 	if !parsed {
 		return false, writeErrorResponse(w, sqlstateGeneric, "malformed Parse message")
 	}
@@ -91,11 +105,16 @@ func handleParse(ctx context.Context, w io.Writer, sess *engine.Session, eq *ext
 	if perr != nil {
 		return false, writeErrorResponse(w, sqlstateGeneric, perr.Error())
 	}
+	oids := make([]uint32, len(paramOIDs))
+	for i, o := range paramOIDs {
+		oids[i] = uint32(o)
+	}
 	eq.statements[name] = &preparedStatement{
 		sql:          query,
 		stmt:         stmt,
 		numParams:    countPlaceholders(query),
 		rowReturning: looksLikeRowReturning(query),
+		paramOIDs:    oids,
 	}
 	return true, writeParseComplete(w)
 }
@@ -211,27 +230,36 @@ func handleBind(w io.Writer, eq *extendedQueryConn, body []byte) (ok bool, err e
 			"bind message supplies %d parameters, but prepared statement %q requires %d",
 			len(paramValues), stmtName, ps.numParams))
 	}
-	for j := range paramValues {
-		if formatCodeFor(paramFormats, j) == 1 {
-			// ParameterDescription always advertises OID 0
-			// (unspecified), so a well-behaved client sends text; a
-			// client that sends binary anyway is rejected outright
-			// rather than misinterpreted. Unlike result values
-			// (buildResultColumns below), binary-format parameters are
-			// not implemented -- real drivers tested in phase 4 Step 5
-			// (PLAN.md) send text for parameters even when they request
-			// binary results, so there was no observed need for it.
-			return false, writeErrorResponse(w, sqlstateGeneric, "binary-format parameters are not supported")
-		}
-	}
-
 	args := make([]any, len(paramValues))
 	for j, v := range paramValues {
 		if v == nil {
 			args[j] = nil
-		} else {
-			args[j] = string(v)
+			continue
 		}
+		if formatCodeFor(paramFormats, j) != 1 {
+			args[j] = string(v)
+			continue
+		}
+		// Binary format (phase 4 Step 7, PLAN.md): real drivers were
+		// found to bind common parameter types in binary by default --
+		// pgJDBC does this for int4/int8/float8/bool/bytea/timestamp
+		// whenever the corresponding setInt/setLong/setDouble/etc. is
+		// used, regardless of what ParameterDescription answered back
+		// (it decides from the OID its own Parse message declared, see
+		// preparedStatement.paramOIDs). There is no way to decode a
+		// binary value without knowing its type, so a client that sends
+		// binary for a parameter it left unspecified (OID 0) or whose
+		// type has no decoder below is rejected outright.
+		oid := uint32(0)
+		if j < len(ps.paramOIDs) {
+			oid = ps.paramOIDs[j]
+		}
+		val, ok := decodeBinaryParam(oid, v)
+		if !ok {
+			return false, writeErrorResponse(w, sqlstateGeneric, fmt.Sprintf(
+				"binary-format parameter %d has an unsupported or unspecified type (OID %d)", j+1, oid))
+		}
+		args[j] = val
 	}
 
 	if portalName != "" {
@@ -354,7 +382,13 @@ func handleDescribe(ctx context.Context, w io.Writer, sess *engine.Session, eq *
 		if !exists {
 			return false, writeErrorResponse(w, sqlstateGeneric, fmt.Sprintf("prepared statement %q does not exist", name))
 		}
-		oids := make([]uint32, ps.numParams) // every parameter: 0 (unspecified) -- see writeParameterDescription
+		// Echo back whatever OIDs the client's own Parse message declared
+		// (ps.paramOIDs); any parameter beyond what Parse declared -- or
+		// every one of them, for a client that left them all unspecified
+		// -- stays 0 (unspecified), matching writeParameterDescription's
+		// prior all-0 behavior for that case.
+		oids := make([]uint32, ps.numParams)
+		copy(oids, ps.paramOIDs)
 		if werr := writeParameterDescription(w, oids); werr != nil {
 			return false, werr
 		}

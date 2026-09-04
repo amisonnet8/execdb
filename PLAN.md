@@ -274,11 +274,13 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
-- 現在のフェーズ: **④PostgreSQL互換ワイヤープロトコル開発、Step 6
-  （`CancelRequest`/`BackendKeyData`）完了**。次はStep 7（他言語ドライバ
-  検証＋CI）から。詳細は下記「フェーズ④のステップ」節・「フェーズ④Step 6
-  （`CancelRequest`/`BackendKeyData`）完了」節を参照（`context.CancelFunc`の
-  使い回しが接続を永久に壊す設計バグを発見・修正した経緯を含む）。
+- 現在のフェーズ: **④PostgreSQL互換ワイヤープロトコル開発、Step 7
+  （他言語ドライバ検証＋CI）完了**。次はStep 8（仕様書・ルール・PLAN・
+  devcontainer統合、フェーズ④最後のステップ）から。詳細は下記
+  「フェーズ④のステップ」節・「フェーズ④Step 7（他言語ドライバ検証＋CI）
+  完了」節を参照（pgJDBCのデフォルト設定がBindパラメータをバイナリ形式で
+  送ってくることを実機確認で発見し、`Parse`メッセージ自身が申告する
+  パラメータ型OIDを手がかりにデコードする設計へ拡張した経緯を含む）。
 - **フェーズ③Step 1（REPL基盤の再構築）完了（2026-09-04）。**
   - `cmd/execdb/access.go`: `splitStatements`から`scanStatements(sql) (complete []string,
     remainder string)`を切り出し（`splitStatements`はremainderが非空白なら末尾へ追加する
@@ -1409,30 +1411,91 @@ Step 1のスパイクで確定した方針（宣言型ベースのアフィニ�
 - `make check`・`make race`・`make test`（e2e、2回連続実行でflakinessなし）
   とも green を確認済み。依存追加なし
 
-## フェーズ④への申し送り
+## フェーズ④Step 7（他言語ドライバ検証＋CI）完了（2026-09-04）
 
-フェーズ②・③の設計・実装過程で判明した、意図的にスコープ外とした事項。
-フェーズ③（REPL開発）は全7ステップを完了し、`.mode`/`.headers`/`.dump`/
-`.import`/`--snapshot-interval`/Ctrl+Cはすべて実装済み。スキーマ内省API
-（`Tables()`/`Schema()`相当）の`engine`側切り出しは、フェーズ③のスコープ
-判断で明示的に**不採用**と確定した（`.tables`/`.schema`/`.dump`/`.import`は
-今後も`cmd/execdb`側の生SQL実装のまま——`.claude/rules/naming.md`参照）。
-残るのは以下、いずれもフェーズ④（PostgreSQL互換ワイヤープロトコル開発）の
-スコープ。
+Python（psycopg2）・Node.js（node-postgres）・Java（pgJDBC）を`apt-get`/`npm`/
+Maven Centralから都度インストール・取得し、それぞれ**自分自身のデフォルト
+接続設定のまま**ExecDBのpgwireへ接続できることを実機で検証した。.NET
+（Npgsql）は計画通り今回見送り（Extended Query実装済みのため接続自体は
+可能なはずという前提を申し送り事項として記録するのみ）。
 
-**フェーズ④（PostgreSQL互換ワイヤープロトコル開発）:**
-- 型マッピング（Postgres OID対応表）— 現状全列OID 25(text)固定。
-  `sql.Rows.ColumnTypes()`が`Next()`前でも正しい値を返すことは実測済み
-  （`.claude/rules/sqlite-quirks.md`）なので、これを土台に主要ドライバで
-  実接続検証しながら確定する（`.claude/rules/pgwire.md`）
-- `--user`認証（cleartext password）
-- `CancelRequest`/`BackendKeyData`のPID・secretレジストリ — フェーズ②Step 5で
-  実装したのは「クライアント切断時の同一接続内キャンセル」（`ctx`＋
-  `watchForDisconnect`）のみ。**別接続からの明示的なキャンセル要求**には
-  未対応（`writeBackendKeyData`は`0, 0`固定のまま）
-- Extended Queryプロトコル（`Parse`/`Bind`/`Execute`）— 現時点で対応する
-  計画はない。対応する場合は`.claude/rules/pgwire.md`の「スコープを勝手に
-  広げない」方針に従い、まず仕様書を更新してから着手する
+- **`tests/drivers/`（新規）**: `python/check.py`（psycopg2、`conn.commit()`/
+  `conn.rollback()`経由で暗黙のBEGIN/COMMITを送らせる設計）・`node/check.js`
+  ＋`package.json`＋`run.sh`（node-postgres、`$1`パラメータクエリで
+  Extended Queryを明示的に使う）・`java/Check.java`＋`fetch-jdbc.sh`＋
+  `run.sh`（pgJDBC、`PreparedStatement`経由）。各チェックは
+  SELECT（int/float/text/bytea/NULL）・DDL拒否（SQLSTATE 42501）・
+  INSERT+COMMIT+SELECTの基本往復を検証し、成功時`OK`を出力する
+  （`tests/pgclient`と同じ規約）。Node依存（`node_modules/`）・Javaの
+  pgJDBC jar（`lib/`）はgitignore済みの場所へ都度取得する設計とし、
+  コミットしない（`.claude/rules/distribution.md`のバイナリ非コミット
+  方針を踏襲、詳細は`tests/drivers/README.md`）
+- **`tests/drivers/run-all.sh`（新規）**: 3チェックをまとめて実行する
+  共有スクリプト。渡されたバイナリをスクラッチコピーし`.overwrite`で
+  テーブル`t(a INTEGER)`を焼き込んでサーバーモードで起動、各ランタイムが
+  `PATH`に無ければ`skip`表示のみで失敗扱いにしない（フェーズ③Step 6の
+  PTY専用Ctrl+Cチェックと同じ既存パターン）。`tests/e2e.sh`と
+  CI（下記`drivers`ジョブ）の両方から同一スクリプトを呼び、ロジックの
+  二重化を避けた
+- **`.github/workflows/test.yml`**: `drivers`ジョブを新設（`ubuntu-latest`
+  限定——プロトコル実装自体はOS非依存であり、3ランタイム×3OSを揃える
+  コストに見合わないため`check`の3OSマトリクスには含めない）。
+  `setup-python`/`setup-java`/`setup-node`で各ランタイムを用意し、
+  `make build`→`tests/drivers/run-all.sh`を実行。action参照は
+  `testing.md`の教訓通り`git ls-remote`ではなくGitHub APIで実タグ名を
+  事前確認（`setup-python@v7`/`setup-java@v6`/`setup-node@v7`——最初の
+  見積もり`@v6`/`@v5`/`@v5`はいずれも誤りだった）
+- **実機検証中に発見した、計画外の重大な相互運用性バグ（pgJDBC）**:
+  pgJDBCをデフォルト設定のまま接続すると、`PreparedStatement.setInt`/
+  `setDouble`等がBindメッセージのパラメータを**バイナリ形式**で送信し、
+  ExecDB側は「バイナリ形式のパラメータは未対応」として一律拒否していた
+  ため（フェーズ④Step 5の確定方針）、prepared statement経由のDML/SELECTが
+  pgJDBCのデフォルト設定では全滅した（`binaryTransfer=false`を明示すれば
+  回避可能——だがそれは「デフォルト設定のまま動く」というフェーズ④の
+  完了条件に反する）。ユーザーに確認の上、**パラメータのバイナリ形式も
+  実装する**方針を選択（結果値側でのpgxの前例——フェーズ④Step 5——と同型の
+  判断）。
+  - **原因の特定**: `handleParse`が`Parse`メッセージ自身のパラメータ型OID
+    配列（`paramOIDs`）を読み捨てていたのが盲点だった。一時的なデバッグ
+    出力で実際の`Parse`の中身を見たところ、pgJDBCは`setInt`に対し
+    `Parse`の時点で自ら`OID 23`（int4）を申告しており、
+    `ParameterDescription`が何を返すかとは無関係に、その自己申告した型に
+    基づいてバインド形式を決めていることが判明した（実PostgreSQLでも
+    同様の使い方が許容されているプロトコル本来の挙動）
+  - **修正**: `preparedStatement`に`paramOIDs []uint32`を追加して`Parse`の
+    申告を保持し、`handleBind`がバイナリ形式のパラメータを受け取った際は
+    そのOIDを手がかりに`pgtype.go`の新設`decodeBinaryParam`でデコードする
+    設計に変更（`int2`/`int4`/`int8`/`float4`/`float8`/`bool`/`bytea`/
+    `timestamp`の8種。`int2`/`int4`/`float4`は結果値側の`columnOID`が
+    一度も返さないOIDだが、クライアントが自己申告するパラメータ型としては
+    独立に出現しうるため対応範囲に含めた）。OID未申告（0）のままバイナリで
+    送ってきた場合はデコードのしようがないため従来通り拒否——
+    `TestExtendedQueryRejectsBinaryFormatParameters`はこのケースの
+    回帰テストとして残し、新設した
+    `TestExtendedQueryAcceptsBinaryFormatParametersWithDeclaredOID`が
+    今回のバグそのものの回帰テストになっている。`pgtype_test.go`にも
+    `decodeBinaryParam`の純粋関数テストを追加
+  - `execdb_spec.md`§8・`.claude/rules/pgwire.md`を、この発見の経緯
+    （原因特定の過程を含む）とあわせて更新
+- **実機確認**: `python3`/`node`/`java`をdevcontainerへ都度インストール
+  （PLAN.md「保留事項」へ記録）した上で、3ドライバとも`tests/e2e.sh`・
+  `tests/drivers/run-all.sh`単体実行の両方で成功を確認。`make check`・
+  `make race`・`make test`（e2e、driversチェック込み）とも green
+- 依存追加: Goの`go.mod`/`go.sum`は変更なし（`decodeBinaryParam`は標準
+  ライブラリのみ）。Node/Javaの依存はいずれもgitignore済みでコミット対象外
+
+## フェーズ④への申し送り（Step 7完了時点で消化済み）
+
+このセクションはフェーズ③完了時点（Step 2着手前）の申し送りとして書かれた
+ものだが、フェーズ④Step 2〜7で以下の項目はすべて消化済みになった。
+
+- ~~型マッピング（Postgres OID対応表）~~ → Step 1のスパイクとStep 2で確定・実装済み
+- ~~`--user`認証（cleartext password）~~ → Step 4で実装済み
+- ~~`CancelRequest`/`BackendKeyData`のPID・secretレジストリ~~ → Step 6で実装済み
+- ~~Extended Queryプロトコル~~ → Step 1で採用に方針転換、Step 5で実装済み
+  （さらにStep 7でパラメータ側のバイナリ形式も追加）
+
+フェーズ④の残りはStep 8（仕様書・ルール・PLAN・devcontainer統合）のみ。
 
 ## 保留事項
 
@@ -1440,4 +1503,11 @@ Step 1のスパイクで確定した方針（宣言型ベースのアフィニ�
   進める方針（都度手動でインストール・設定して進め、フェーズ④完了時に
   まとめて `devcontainer.json` へ反映する）。session内で手動インストール・
   設定を行った場合は、忘れずにここへ追記すること。
-  - （なし）
+  - **フェーズ④Step 7（他言語ドライバ検証）で手動インストール（2026-09-04）**:
+    `apt-get install python3-pip nodejs npm openjdk-17-jdk-headless
+    python3-psycopg2`（`python3-psycopg2`はpipのPEP 668
+    externally-managed-environment制約を避けるためapt経由を選択）。
+    Node/Javaの依存（`pg`パッケージ、pgJDBCのjar）は`tests/drivers/`配下に
+    gitignore済みの場所へ都度取得する設計にしたため、コンテナ側に
+    恒久化すべきはこれら3ランタイム本体（`python3-pip`/`nodejs`+`npm`/
+    `openjdk-17-jdk-headless`）と`python3-psycopg2`のみ。

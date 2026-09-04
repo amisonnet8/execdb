@@ -369,8 +369,8 @@ Postgresプロトコルの全機能を実装するのではなく、接続・ク
 | :--- | :--- |
 | 認証ハンドシェイク（デフォルト`trust`相当、`--user`指定時のみcleartext password認証。§9参照） | SCRAM/MD5等の認証方式 |
 | Simple Query プロトコル（`Query`メッセージ） | `COPY`系プロトコル、LISTEN/NOTIFY |
-| Extended Query プロトコル（`Parse`/`Bind`/`Describe`/`Execute`/`Sync`/`Close`/`Flush`。フェーズ④Step 5で採用に変更——理由は下記） | バイナリ形式のパラメータ（`Bind`の値側。テキストのみ） |
-| 結果値のバイナリ形式（`int8`/`float8`/`bool`/`bytea`/`timestamp`の5型のみ。理由は下記） | NUMERICのバイナリ形式（複雑なため未実装。理由は下記） |
+| Extended Query プロトコル（`Parse`/`Bind`/`Describe`/`Execute`/`Sync`/`Close`/`Flush`。フェーズ④Step 5で採用に変更——理由は下記） | NUMERICのバイナリ形式（複雑なため未実装。理由は下記） |
+| 結果値・パラメータ値双方のバイナリ形式（`int2`/`int4`/`int8`/`float4`/`float8`/`bool`/`bytea`/`timestamp`。理由は下記） | ─ |
 | `RowDescription` / `DataRow` / `CommandComplete` | 行数制限付き実行・`PortalSuspended`（`Execute`のmaxRowsは無視し常に最後まで実行する） |
 | エラー応答（`ErrorResponse`） | 詳細なSQLSTATEコード体系（簡略化したコードで代用） |
 
@@ -402,6 +402,28 @@ NUMERIC親和性は内部的に必ずINTEGERかREALのいずれかで格納さ�
 桁グループ符号化）を実装する代わりに、NUMERIC親和性の宣言型は実行時のGo
 動的型（int64/float64）で`int8`/`float8`へ振り分ける設計とした（詳細は
 `cmd/execdb/pgtype.go`）。
+
+**パラメータ側のバイナリ形式が必要になった経緯（フェーズ④Step 7、実機確認で判明）:**
+Step 5時点では「パラメータは常にテキスト形式」と位置づけ、`Bind`が
+バイナリ形式のパラメータを受け取ると一律拒否していた（`pgx`/`psycopg`は
+デフォルトでパラメータをテキスト送信するため、この時点では問題が顕在化
+しなかった）。ところがフェーズ④Step 7の他言語ドライバ検証で、pgJDBCが
+`PreparedStatement.setInt`/`setDouble`等をデフォルト設定のまま使うと、
+`Bind`メッセージのパラメータをバイナリ形式で送ってくることが判明した
+（`Parse`メッセージ自身が、例えば`setInt`に対して型OID 23／`int4`を
+自己申告している——`ParameterDescription`がどう答えるかとは無関係に、
+クライアント自身が把握している型で決め打ちしてくる）。この結果、
+prepared statement経由のDML/SELECTがpgJDBCのデフォルト設定では
+全滅するという、Extended Query採用の目的そのものに反する事態になったため、
+`Bind`側もパラメータのバイナリ形式をデコードする設計に変更した。
+デコードは`Parse`メッセージがクライアント自身の申告として送ってきた
+パラメータ型OID（従来は読み捨てていた）を頼りに行う——`Bind`の
+ワイヤ形式自体には型情報が一切含まれないため、これが唯一の手がかりに
+なる。対応OIDは結果値より広く、`int2`/`int4`/`float4`（結果値側では
+`columnOID`が使わないOIDだが、クライアントが申告するパラメータ型としては
+現実に出現する）を含む8種（詳細は`cmd/execdb/pgtype.go`の
+`decodeBinaryParam`）。クライアントが型OIDを申告せず（0／unspecified）に
+バイナリ形式で送ってきた場合は、デコードのしようがないため従来通り拒否する。
 
 ### 認証（オプトイン、Zero-Authがデフォルト）
 

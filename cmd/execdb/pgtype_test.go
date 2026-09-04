@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/amisonnet8/execdb/engine"
 )
@@ -251,6 +253,82 @@ func TestEncodeBinaryOnlyCoversBinaryCapableOIDs(t *testing.T) {
 	for _, oid := range []uint32{oidText, oidNumeric} {
 		if _, ok := encodeBinary(oid, "x"); ok {
 			t.Errorf("encodeBinary(%d, ...) ok = true, want false (not binary-capable)", oid)
+		}
+	}
+}
+
+// TestDecodeBinaryParam checks decodeBinaryParam against every OID phase 4
+// Step 7 added support for -- including int2/int4/float4, which
+// columnOID/binaryCapableOIDs never advertise on the result side, but
+// which a client's own Bind parameter can still declare (pgJDBC was found,
+// via real connection testing, to declare OID 23/int4 by default for a
+// plain PreparedStatement.setInt, independent of the column it's compared
+// against; PLAN.md's phase 4 Step 7 notes).
+func TestDecodeBinaryParam(t *testing.T) {
+	cases := []struct {
+		name string
+		oid  uint32
+		data []byte
+		want any
+	}{
+		{"int2", oidInt2, []byte{0, 5}, int64(5)},
+		{"int2 negative", oidInt2, []byte{0xff, 0xff}, int64(-1)},
+		{"int4", oidInt4, []byte{0, 0, 1, 44}, int64(300)},
+		{"int8", oidInt8, []byte{0, 0, 0, 0, 0, 0, 0, 42}, int64(42)},
+		{"float4", oidFloat4, []byte{0x40, 0x20, 0, 0}, float64(2.5)},
+		{"float8", oidFloat8, []byte{0x3f, 0xf0, 0, 0, 0, 0, 0, 0}, float64(1.0)},
+		{"bool true", oidBool, []byte{1}, true},
+		{"bool false", oidBool, []byte{0}, false},
+		{"bytea", oidBytea, []byte{0x00, 0xff, 0x10}, []byte{0x00, 0xff, 0x10}},
+		{"timestamp at PostgreSQL epoch", oidTimestamp, []byte{0, 0, 0, 0, 0, 0, 0, 0}, pgEpoch},
+	}
+	for _, c := range cases {
+		got, ok := decodeBinaryParam(c.oid, c.data)
+		if !ok {
+			t.Errorf("%s: ok = false, want true", c.name)
+			continue
+		}
+		switch want := c.want.(type) {
+		case []byte:
+			gotBytes, isBytes := got.([]byte)
+			if !isBytes || !bytes.Equal(gotBytes, want) {
+				t.Errorf("%s: got %v, want % x", c.name, got, want)
+			}
+		case time.Time:
+			gotTime, isTime := got.(time.Time)
+			if !isTime || !gotTime.Equal(want) {
+				t.Errorf("%s: got %v, want %v", c.name, got, want)
+			}
+		default:
+			if got != c.want {
+				t.Errorf("%s: got %v (%T), want %v (%T)", c.name, got, got, c.want, c.want)
+			}
+		}
+	}
+}
+
+// TestDecodeBinaryParamRejectsUnspecifiedOrUnsupportedTypes checks that
+// decodeBinaryParam reports ok == false for OID 0 (a client must not send
+// binary for a parameter it left unspecified, since Bind carries no type
+// tag of its own to decode it with) and for any OID with no decoder,
+// as well as for a length that doesn't match a fixed-width OID's binary
+// format.
+func TestDecodeBinaryParamRejectsUnspecifiedOrUnsupportedTypes(t *testing.T) {
+	cases := []struct {
+		name string
+		oid  uint32
+		data []byte
+	}{
+		{"unspecified OID 0", 0, []byte{0, 0, 0, 1}},
+		{"text has no binary decoder", oidText, []byte("hello")},
+		{"numeric has no binary decoder", oidNumeric, []byte{0, 0, 0, 0}},
+		{"int8 wrong length", oidInt8, []byte{0, 0, 0, 1}},
+		{"int4 wrong length", oidInt4, []byte{0, 1}},
+		{"bool wrong length", oidBool, []byte{1, 0}},
+	}
+	for _, c := range cases {
+		if _, ok := decodeBinaryParam(c.oid, c.data); ok {
+			t.Errorf("%s: ok = true, want false", c.name)
 		}
 	}
 }
