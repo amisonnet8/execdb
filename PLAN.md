@@ -274,12 +274,11 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
-- 現在のフェーズ: **④PostgreSQL互換ワイヤープロトコル開発、Step 5
-  （Extended Queryプロトコル）完了**。次はStep 6（`CancelRequest`/
-  `BackendKeyData`）から。詳細は下記「フェーズ④のステップ」節・
-  「フェーズ④Step 5（Extended Queryプロトコル）完了」節を参照
-  （実機確認で判明した「pgxがint8/float8/bool/bytea/timestampに
-  デフォルトでバイナリ結果形式を要求する」という重要な追加事実を含む）。
+- 現在のフェーズ: **④PostgreSQL互換ワイヤープロトコル開発、Step 6
+  （`CancelRequest`/`BackendKeyData`）完了**。次はStep 7（他言語ドライバ
+  検証＋CI）から。詳細は下記「フェーズ④のステップ」節・「フェーズ④Step 6
+  （`CancelRequest`/`BackendKeyData`）完了」節を参照（`context.CancelFunc`の
+  使い回しが接続を永久に壊す設計バグを発見・修正した経緯を含む）。
 - **フェーズ③Step 1（REPL基盤の再構築）完了（2026-09-04）。**
   - `cmd/execdb/access.go`: `splitStatements`から`scanStatements(sql) (complete []string,
     remainder string)`を切り出し（`splitStatements`はremainderが非空白なら末尾へ追加する
@@ -1349,6 +1348,64 @@ Step 1のスパイクで確定した方針（宣言型ベースのアフィニ�
   している。ただし人手でバックグラウンドサーバーを都度起動して調査する際は、
   作業後に確実に`kill`するか、`ps aux | grep execdb`で残存確認する習慣が
   必要という教訓）
+- `make check`・`make race`・`make test`（e2e、2回連続実行でflakinessなし）
+  とも green を確認済み。依存追加なし
+
+## フェーズ④Step 6（`CancelRequest`/`BackendKeyData`）完了（2026-09-04）
+
+- `cmd/execdb/pgcancel.go`（新規）: `cancelKey{pid, secret}`（実PostgreSQLの
+  secretと同様、強固な認証ではなく他クライアントによる偶発的な誤爆を防ぐ
+  程度の目的なので`math/rand`で十分と判断）をキーに、プロセス全体で1つの
+  `globalCancelRegistry`（mutex保護map）が各接続を追跡。`handleCancelRequest`
+  が`CancelRequest`の生body（PID＋secret、各Int32）を読み取り、
+  `globalCancelRegistry.cancel(key)`で対象接続の現在実行中のクエリを
+  キャンセルする（見つからない・secret不一致・アイドル中はいずれも無音の
+  no-op——実PostgreSQL準拠）
+- **実装中に発見・修正した重大な設計バグ**: 当初は接続の生存期間全体で
+  固定の`context.CancelFunc`を1つだけ使い回す設計にしたところ、
+  `context.CancelFunc`は一度きりしか呼べない性質のため、
+  **`CancelRequest`（あるいは`watchForDisconnect`）が一度でも発火すると、
+  その接続の以後すべてのクエリが`context canceled`で永久に失敗する**
+  ことが実機確認（`tests/pgclient`）で発覚した（`SELECT 1 after
+  CancelRequest: ... context canceled`）。`CancelRequest`は「そのクエリだけを
+  中断し接続自体は使い続けられる」という実PostgreSQLの重要な性質を持つため、
+  このバグは`CancelRequest`実装で初めて表面化した（`watchForDisconnect`
+  単体では「発火後は接続を捨てる」運用だったため、同じ設計上の欠陥が
+  フェーズ②から気づかれずに残っていたことも判明）。
+  - **修正**: `pgcancel.go`に`connCancel`（mutex保護の`context.CancelFunc`
+    フィールド、`begin(cancel) (end func())`/`cancelCurrent()`）を追加——
+    `interrupt.go`の`replInterrupts.begin`（フェーズ③Step 6、REPLの
+    Ctrl+C用に同じ問題を解決済みだったパターン）とまったく同型。
+    `globalCancelRegistry`は`cancelKey`→`*connCancel`で管理し、
+    `handleConnection`のメインループが**クエリ（メッセージ）ごとに
+    新しい`context.WithCancel`を作って`cc.begin`/`end`で都度登録・解除**
+    するよう変更（`db.Session(ctx)`はもう接続生存期間のctxを必要としない
+    ——`engine.DB.Session`の実装を確認したところ`sdb.Conn(ctx)`の一回の
+    呼び出しにしかctxを使わないため、`context.Background()`で十分と判明）。
+    **`for`ループ内では`defer end()`ではなく明示呼び出しにする**——ループの
+    中でdeferすると、そのループを含む関数（`handleConnection`）全体が
+    終わるまで実行されず、次のクエリが始まる前に確実に解除されないため
+    （`stop()`が既にこの明示呼び出しパターンだったのと同じ理由）
+- `cmd/execdb/pgwire.go`: `sendStartupTail`が`cancelKey`を受け取り実際の
+  値を送るよう変更（従来の`0, 0`固定を解消）。`performHandshake`の
+  `CancelRequest`分岐が読み捨てから`handleCancelRequest`呼び出しへ変更
+- 新規テスト`pgcancel_test.go`: レジストリの登録・照合・secret不一致・
+  unregister後の無効化・キー一意性、**`connCancel`が「クエリ1をキャンセル
+  してもクエリ2はキャンセルされたまま始まらない」ことを直接検証する
+  回帰テスト**（今回のバグをピンポイントで固定化）、`-race`向けの並行
+  アクセススモークテスト
+- `tests/pgclient/main.go`: `checkCancelRequest`を追加——別接続の
+  `conn.PgConn().CancelRequest(ctx)`で長時間クエリ（`WITH RECURSIVE`）を
+  中断し、**中断後も同じ接続で次のクエリ（`SELECT 1`）が使えること**まで
+  確認（`checkDisconnectDuringQuery`との違い——切断は接続を捨てる想定、
+  `CancelRequest`は接続を維持したまま特定のクエリだけ中断する想定——を
+  明示的にテストで区別）
+- `.claude/rules/pgwire.md`:「クエリキャンセルの2系統」節へ全面改訂
+  （クライアント切断時の自動キャンセルと真の`CancelRequest`を並記し、
+  両者が`connCancel`という同じ仕組みを共有すること、発見した設計バグと
+  修正方法を記録）
+- **実機確認**: `tests/pgclient`（`CancelRequest`込み）が実サーバーに対し
+  成功することを確認（修正前は`OK`が出ず、修正後`OK`が出ることを対比確認）
 - `make check`・`make race`・`make test`（e2e、2回連続実行でflakinessなし）
   とも green を確認済み。依存追加なし
 

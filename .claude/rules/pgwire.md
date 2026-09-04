@@ -142,14 +142,41 @@ SQLSTATE `25P02`（"current transaction is aborted"）で拒否**し、実行そ
 pgx/JDBC等のドライバを混乱させるため採用しなかった）。`tests/pgclient`の
 `checkFailedTransactionState`で自動検証済み。
 
-### クライアント切断時のクエリキャンセル（`CancelRequest`とは別）
+### クエリキャンセルの2系統（クライアント切断 と `CancelRequest`、フェーズ④Step 6で後者を実装）
 
-`handleConnection`は接続ごとに`context.Context`を持ち、クエリ実行中は
-`watchForDisconnect`（`pgwire.go`）が別goroutineで`conn`への1バイトRead待ちを
-行うことで、クライアントの切断（あるいは予期しないデータ送出）を検知して
-`cancel()`する。これによりクライアントが消えた後もクエリが走り続けることを防ぐ。
-**これは真の`CancelRequest`プロトコル（別接続からの明示キャンセル要求。
-`BackendKeyData`のPID/secretで対象を特定する仕組み）とは異なる**——現状
-`BackendKeyData`は`0, 0`固定のまま（フェーズ④で対応、`PLAN.md`参照）。
-`tests/pgclient`の`checkDisconnectDuringQuery`（クエリのcontextをタイムアウト
-させてpgxに接続を諦めさせ、その後別接続がすぐに繋がることを確認）で自動検証済み。
+クエリキャンセルには意図的に別々の2つの経路がある。
+
+1. **クライアント切断時の自動キャンセル**（フェーズ②Step 5から）:
+   クエリ実行中は`watchForDisconnect`（`pgwire.go`）が別goroutineで`conn`への
+   1バイトRead待ちを行うことで、クライアントの切断（あるいは予期しない
+   データ送出）を検知して`cancel()`する。`tests/pgclient`の
+   `checkDisconnectDuringQuery`（クエリのcontextをタイムアウトさせてpgxに
+   接続を諦めさせ、その後別接続がすぐに繋がることを確認）で自動検証済み。
+2. **真の`CancelRequest`プロトコル**（別接続からの明示キャンセル要求。
+   `BackendKeyData`のPID/secretで対象を特定する仕組み、フェーズ④Step 6で実装）:
+   `pgcancel.go`の`globalCancelRegistry`（プロセス全体で1つ、`cancelKey{pid,
+   secret}` → `*connCancel`のmap）が実体。`BackendKeyData`はもう`0, 0`固定では
+   なく、接続ごとに`register()`で採番した実際の値を送る。`performHandshake`が
+   `CancelRequest`を受け取ると対象の`connCancel.cancelCurrent()`を呼び、
+   実行中のクエリがあればキャンセルする（無ければ無音のno-op、実PostgreSQL
+   同様）。`tests/pgclient`の`checkCancelRequest`（別接続の
+   `conn.PgConn().CancelRequest(ctx)`で長時間クエリを中断し、**中断後も同じ
+   接続で次のクエリが使えること**まで確認）で自動検証済み。
+
+**両者は`cc.begin(cancel)`/`end()`という同じ仕組みを共有する**
+（`pgcancel.go`の`connCancel`）。`context.CancelFunc`は一度きりしか使えない
+ため、接続の生存期間全体に対して固定の`cancel`を1つだけ使い回すと、
+（`watchForDisconnect`にせよ`CancelRequest`にせよ）どちらか一方が一度でも
+発火した時点で、その接続の**以後すべてのクエリ**が`context canceled`で
+永久に失敗するようになる、という致命的な設計ミスをフェーズ④Step 6の実装中に
+発見・修正した（`CancelRequest`は「そのクエリだけを中断し、接続自体は
+使い続けられる」という実PostgreSQLの重要な性質を持つため、この設計ミスは
+`CancelRequest`を実装して初めて表面化した——`watchForDisconnect`単体では
+「発火後は接続を捨てる」運用だったため、同じバグが隠れたまま気づかれずに
+残っていた）。修正: `handleConnection`のメインループが**クエリ（メッセージ）
+ごとに新しい`context.WithCancel`を作り**、`cc.begin(cancel)`で登録・処理後に
+`end()`で解除する（`interrupt.go`の`replInterrupts.begin`とまったく同じ
+パターン）。ループ内では`defer end()`ではなく**明示呼び出し**にする点に注意
+——`for`ループの中で`defer`すると、そのループが回っている関数
+（`handleConnection`）全体が終わるまで実行されず、次のクエリが始まる前に
+確実に解除されない。

@@ -122,6 +122,9 @@ func run(connString string) error {
 	if err := checkDisconnectDuringQuery(ctx, connString); err != nil {
 		return fmt.Errorf("disconnect during query: %w", err)
 	}
+	if err := checkCancelRequest(ctx, connString); err != nil {
+		return fmt.Errorf("cancel request: %w", err)
+	}
 
 	return nil
 }
@@ -261,6 +264,57 @@ func checkDisconnectDuringQuery(ctx context.Context, connString string) error {
 	}
 	if one != 1 {
 		return fmt.Errorf("SELECT 1 after reconnect returned %d, want %d", one, 1)
+	}
+	return nil
+}
+
+// checkCancelRequest proves a genuine CancelRequest -- a second, separate
+// physical connection explicitly asking to cancel this one's in-flight
+// query, via pgconn.PgConn.CancelRequest -- interrupts a long-running
+// query (cmd/execdb/pgcancel.go's globalCancelRegistry, phase 4 Step 6).
+// This is distinct from checkDisconnectDuringQuery above, which relies on
+// the SAME connection's own context timing out and the client giving up
+// on that connection entirely; a CancelRequest instead leaves the
+// connection itself usable afterward for a fresh query, which this check
+// verifies explicitly.
+func checkCancelRequest(ctx context.Context, connString string) error {
+	conn, err := pgx.Connect(ctx, connString)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer conn.Close(ctx)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := conn.Exec(ctx, `WITH RECURSIVE cnt(x) AS (
+			SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 2000000000
+		) SELECT count(*) FROM cnt`)
+		done <- err
+	}()
+
+	time.Sleep(200 * time.Millisecond) // let the query actually start running
+	if err := conn.PgConn().CancelRequest(ctx); err != nil {
+		return fmt.Errorf("CancelRequest: %w", err)
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			return errors.New("expected the long query to be interrupted by CancelRequest")
+		}
+	case <-time.After(10 * time.Second):
+		return errors.New("query did not return after CancelRequest")
+	}
+
+	// The connection itself must still be usable: CancelRequest only
+	// interrupts the one query, unlike checkDisconnectDuringQuery's
+	// client-gives-up-on-the-whole-connection scenario.
+	var one int64
+	if err := conn.QueryRow(ctx, "SELECT 1").Scan(&one); err != nil {
+		return fmt.Errorf("SELECT 1 after CancelRequest: %w", err)
+	}
+	if one != 1 {
+		return fmt.Errorf("SELECT 1 after CancelRequest returned %d, want %d", one, 1)
 	}
 	return nil
 }

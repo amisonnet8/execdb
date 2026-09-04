@@ -74,15 +74,17 @@ func acceptLoop(ln net.Listener, db *engine.DB, user, password string) {
 // handleConnection runs one client session: the authentication handshake
 // (spec §8 -- Zero-Auth by default, or a cleartext password challenge when
 // user != "", auth.go's authenticateConnection), then a loop of Simple
-// Query / Terminate messages (.claude/rules/pgwire.md's protocol subset).
+// Query / Extended Query / Terminate messages
+// (.claude/rules/pgwire.md's protocol subset).
 //
 // One TCP/UDS connection gets exactly one engine.Session (spec §2/§8: the
 // external I/F is an independent client of the live database, with its
 // own real SQL transactions -- see engine/session.go). The Session's
 // context is canceled when this connection ends, including when the
 // client disconnects while a query is still running (watchForDisconnect
-// below); a separate connection's CancelRequest is still phase 4 future
-// work, .claude/rules/pgwire.md.
+// below) or a separate connection sends a matching CancelRequest
+// (globalCancelRegistry, pgcancel.go, phase 4 Step 6) -- two independent
+// cancellation triggers on the same context.
 func handleConnection(conn net.Conn, db *engine.DB, user, password string) {
 	defer conn.Close()
 
@@ -93,14 +95,15 @@ func handleConnection(conn net.Conn, db *engine.DB, user, password string) {
 	if !authenticateConnection(conn, user, password, startupParams) {
 		return
 	}
-	if err := sendStartupTail(conn); err != nil {
+
+	key, cc, unregister := globalCancelRegistry.register()
+	defer unregister()
+
+	if err := sendStartupTail(conn, key); err != nil {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sess, err := db.Session(ctx)
+	sess, err := db.Session(context.Background())
 	if err != nil {
 		writeErrorResponse(conn, sqlstateGeneric, err.Error())
 		return
@@ -118,9 +121,21 @@ func handleConnection(conn net.Conn, db *engine.DB, user, password string) {
 		}
 		switch msg.Type {
 		case 'Q':
+			// A fresh, single-query context.CancelFunc is registered with
+			// cc (both watchForDisconnect below and any concurrent
+			// CancelRequest, pgcancel.go, call through it) and explicitly
+			// unregistered right after this query finishes -- not
+			// deferred, since this case body runs inside the connection's
+			// long-lived for loop, and a defer here would only fire when
+			// the whole connection closes, not at the end of this one
+			// query (connCancel's doc comment).
+			ctx, cancel := context.WithCancel(context.Background())
+			end := cc.begin(cancel)
 			stop := watchForDisconnect(conn, cancel)
 			txState, err = handleSimpleQuery(ctx, conn, sess, params, txState, cStringFromBody(msg.Body))
 			stop()
+			end()
+			cancel()
 			if err != nil {
 				return
 			}
@@ -138,11 +153,15 @@ func handleConnection(conn net.Conn, db *engine.DB, user, password string) {
 		// PLAN.md's phase 4 Step 5 notes) is that a client vanishing
 		// mid-Execute without closing the TCP connection is only
 		// noticed the next time this loop tries to read from conn, not
-		// while that Execute is still running.
+		// while that Execute is still running. A CancelRequest
+		// (pgcancel.go) still works here, since it goes through cc
+		// rather than a disconnect-detecting background read.
 		case 'P', 'B', 'D', 'E', 'H':
 			if eq.inError {
 				continue // real PostgreSQL's rule: skip to the next Sync
 			}
+			ctx, cancel := context.WithCancel(context.Background())
+			end := cc.begin(cancel)
 			var ok bool
 			switch msg.Type {
 			case 'P':
@@ -156,6 +175,8 @@ func handleConnection(conn net.Conn, db *engine.DB, user, password string) {
 			case 'H':
 				ok = true // Flush: a no-op, since responses are already sent as they're produced
 			}
+			end()
+			cancel()
 			if err != nil {
 				return
 			}
@@ -241,11 +262,14 @@ func watchForDisconnect(conn net.Conn, cancel context.CancelFunc) (stop func()) 
 // whatever order the client sends them. libpq-based clients (psql
 // included) send GSSENCRequest before SSLRequest when built with GSSAPI
 // support; both must get 'N' or the client hangs waiting for a response
-// that never comes. It returns the StartupMessage's parameters (notably
-// "user", which auth.go's authenticateConnection checks against --user)
-// and whether the connection is still usable (false for a CancelRequest,
-// which is still not acted on -- .claude/rules/pgwire.md -- or an error;
-// the caller just closes either way).
+// that never comes. A CancelRequest (phase 4 Step 6) is looked up in
+// globalCancelRegistry and, if it names a still-open connection, cancels
+// it; either way this connection itself is reported unusable, since real
+// PostgreSQL never sends any response to a CancelRequest and always
+// closes that connection immediately (the caller does the same here). On
+// success it returns the StartupMessage's parameters (notably "user",
+// which auth.go's authenticateConnection checks against --user) and
+// whether the connection is still usable.
 func performHandshake(conn net.Conn) (map[string]string, bool) {
 	for {
 		length, code, err := readStartupHeader(conn)
@@ -258,7 +282,7 @@ func performHandshake(conn net.Conn) (map[string]string, bool) {
 				return nil, false
 			}
 		case codeCancelRequest:
-			io.CopyN(io.Discard, conn, int64(length-8))
+			handleCancelRequest(conn, length)
 			return nil, false
 		case protocolVersion3:
 			params, err := readStartupParams(conn, int(length-8))
@@ -292,14 +316,16 @@ func startupParameterStatus() [][2]string {
 // authentication (spec §8's handshake, after auth.go's
 // authenticateConnection has already sent AuthenticationOk): a
 // ParameterStatus for each of startupParameterStatus's values,
-// BackendKeyData, then ReadyForQuery.
-func sendStartupTail(conn net.Conn) error {
+// BackendKeyData (carrying key, so a later CancelRequest naming it can
+// find this connection in globalCancelRegistry -- pgcancel.go, phase 4
+// Step 6), then ReadyForQuery.
+func sendStartupTail(conn net.Conn, key cancelKey) error {
 	for _, kv := range startupParameterStatus() {
 		if err := writeParameterStatus(conn, kv[0], kv[1]); err != nil {
 			return err
 		}
 	}
-	if err := writeBackendKeyData(conn, 0, 0); err != nil {
+	if err := writeBackendKeyData(conn, key.pid, key.secret); err != nil {
 		return err
 	}
 	return writeReadyForQuery(conn, 'I')
