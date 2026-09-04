@@ -28,7 +28,11 @@ fmt: ## Format sources in place
 	gofmt -s -w .
 
 fmt-check: ## Fail if sources are unformatted (for CI)
-	@test -z "$$(gofmt -s -l . | tee /dev/stderr)"
+	@unformatted="$$(gofmt -s -l .)"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "$$unformatted" 1>&2; \
+		exit 1; \
+	fi
 
 vet: ## go vet
 	go vet ./...

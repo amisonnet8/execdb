@@ -1,0 +1,6 @@
+# Force LF line endings on checkout regardless of platform/local
+# core.autocrlf settings. Without this, GitHub's windows-latest runner
+# can check files out with CRLF, which makes `gofmt -l` (LF-only) flag
+# every file as unformatted even though nothing is actually wrong
+# (.github/workflows/test.yml's Windows `make check` job).
+* text=auto eol=lf

@@ -62,3 +62,27 @@
   実行でポート/ソケットが衝突する。** 起動したPIDを配列に記録しておき、
   スクリプト全体の`trap ... EXIT`で無条件にkillする「安全網」を、個別の
   `stop_server`呼び出しとは別に必ず用意すること。
+
+## GitHub Actions CI設定時の落とし穴（フェーズ①Step 5、初回push後に発覚）
+
+`.github/workflows/test.yml`を初めてpushした際に実際にCI上でのみ顕在化した
+不具合。手元（Linux）では再現しない種類の問題なので、ここに記録しておく。
+
+- **`Makefile`やシェルスクリプトで`/dev/stderr`等のUnix固有デバイスパスに
+  依存する記述は、Windowsランナー（Git Bash/MSYS環境）で壊れる。** 例:
+  `gofmt -s -l . | tee /dev/stderr`は`tee: /dev/stderr: No such file or
+  directory`で失敗した。`tee`を使わず、出力を変数に受けてから
+  `echo "$var" 1>&2`のように標準の重定向だけで書き直すこと。
+- **Windowsランナーのgit checkoutはデフォルトで`core.autocrlf=true`相当の
+  挙動になりうるため、`.go`ファイルがCRLFで展開され、`gofmt -l`
+  （LF前提）が全ファイルを「未整形」と誤検知する恐れがある。** 上記の
+  `tee`問題を直しただけではこの誤検知を踏む可能性が残るため、リポジトリ
+  ルートに`.gitattributes`（`* text=auto eol=lf`）を置き、チェックアウト時の
+  改行コードをプラットフォームによらずLFに固定すること。
+- **GitHub Actionsの`uses: owner/repo@TAG`は、実際のリリースタグ名と
+  厳密に一致しないと`Unable to resolve action`で失敗する。** 特に`v`
+  プレフィックスの有無を見落としやすい（例:
+  `aquasecurity/trivy-action@0.36.0`ではなく`@v0.36.0`が正しいタグ名
+  だった）。ワークフローに書く前に`curl -sf
+  https://api.github.com/repos/<owner>/<repo>/releases/latest`等で
+  `tag_name`の正確な文字列を確認すること。

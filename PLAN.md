@@ -265,22 +265,42 @@ DSN（`file:execdb?mode=memory&cache=shared`）を使っていても、`Deserial
   - `.github/workflows/test.yml`: ubuntu/macos/windows × Go 1.26で
     `make check`（Windowsは`choco install make`を前段で実行）、および
     別ジョブで`trivy`（vuln+license、HIGH/CRITICALで失敗）を追加
-    ——**ただし未pushのため、実際にCI上でgreenになることは未確認**
-    （次回pushする機会に確認すること）
   - `make check`・`make test`とも問題なし、`trivy`もクリーン
+- **初回push後にCIで2件のエラーが発覚、修正済み（2026-09-04）**:
+  - **Windows: `make check`の`fmt-check`が失敗。** 原因は
+    `gofmt -s -l . | tee /dev/stderr`が Windows（Git Bash/MSYS）環境では
+    `tee: /dev/stderr: No such file or directory`で落ちること。
+    `Makefile`の`fmt-check`を`tee /dev/stderr`に依存しない実装
+    （変数に受けて`[ -n ... ]`で判定、`echo ... 1>&2`で出力）に変更。
+    合わせて、**Windowsランナーのgit checkoutがCRLFに変換すると
+    `gofmt`が全ファイルを「未整形」と誤検知する**既知の問題を先回りして
+    防ぐため、`.gitattributes`（`* text=auto eol=lf`）を追加した
+    （まだ発生していなかったが、`fmt-check`修正だけでは踏む可能性が
+    高かったため合わせて対処）。
+  - **trivyジョブ: `Unable to resolve action
+    aquasecurity/trivy-action@0.36.0`。** タグ名の`v`プレフィックスが
+    抜けていたのが原因（正しくは`v0.36.0`）。修正済み。
+  - 教訓: GitHub Actionsのaction参照は`v`プレフィックスの有無を
+    `git ls-remote`やGitHub APIで事前に確認すること。また、シェル
+    スクリプト・Makefileで`/dev/stderr`等のUnix固有パスに依存する記述は
+    Windowsランナーでの実行を想定して避けること。
+  - **まだ再pushして実際にgreenになったことは未確認**（次回pushする
+    機会に確認すること）。
 - **フェーズ①完了の判定（PLAN.md記載の基準、すべて満たした）**:
   `make check`・`make test`が通る／`psql`と`examples/pgclient`（pgx）の
   両方から疎通しDDL系が拒否される／`go install`で入れたバイナリでも
   `.snapshot`/`.overwrite`が機能する（3点確認済み）。GitHub Actions
-  3OSマトリクスは追加したが実行未確認（push待ち）。
-- 次のアクション: フェーズ②（`engine`ライブラリ開発）の計画を立てる。
-  着手前に、Step 2/4で申し送った既知の制約（複数クライアント同時
-  トランザクションの真の分離が`engine.DB`の単一keeperコネクション設計では
-  未対応な点）への対応方針を含めて設計を検討すること。
+  3OSマトリクスは追加し、初回pushで見つかった不具合を修正済みだが、
+  再push後に実際に3OSとも・trivyともgreenになることは未確認。
+- 次のアクション: 修正をpushしてCIが全ジョブgreenになることを確認する。
+  その後、フェーズ②（`engine`ライブラリ開発）の計画を立てる。着手前に、
+  Step 2/4で申し送った既知の制約（複数クライアント同時トランザクションの
+  真の分離が`engine.DB`の単一keeperコネクション設計では未対応な点）への
+  対応方針を含めて設計を検討すること。
 
 ## 保留事項
 
-- **GitHub Actions CIの実行確認**: `.github/workflows/test.yml`を追加した
-  が、リモートへpushしていないため実際にワークフローが動く・3OSとも
-  greenになることは未確認。次回pushするタイミングで確認し、問題があれば
-  修正すること。
+- **GitHub Actions CIのgreen確認**: `fmt-check`のWindows対応・
+  `.gitattributes`追加・trivyタグ修正を行ったが、修正後に再pushして
+  実際に3OS（特にWindows）・trivyジョブともgreenになることはまだ
+  未確認。次回pushするタイミングで確認し、問題があれば追加修正すること。
