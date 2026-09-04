@@ -153,6 +153,63 @@ func TestSessionContextCancel(t *testing.T) {
 	}
 }
 
+func TestSessionPrepare(t *testing.T) {
+	db, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE t(a INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := db.Session(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	stmt, err := s.Prepare("INSERT INTO t VALUES (?)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmt.Close()
+
+	for i := 0; i < 3; i++ {
+		if _, err := stmt.Exec(i); err != nil {
+			t.Fatalf("stmt.Exec(%d): %v", i, err)
+		}
+	}
+
+	var count int
+	if err := s.QueryRow("SELECT count(*) FROM t").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Errorf("count = %d, want 3", count)
+	}
+
+	// A statement prepared on the Session's connection must still see a
+	// transaction later opened (as a plain SQL statement) on that same
+	// connection -- the whole point of a Session over a pooled one-shot
+	// connection (spec §2, engine/session.go's doc comment).
+	if _, err := s.Exec("BEGIN"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stmt.Exec(99); err != nil {
+		t.Fatalf("stmt.Exec inside an open transaction: %v", err)
+	}
+	if _, err := s.Exec("ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.QueryRow("SELECT count(*) FROM t").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Errorf("count after rollback = %d, want 3 (the row inserted inside the rolled-back transaction should be gone)", count)
+	}
+}
+
 func TestSessionCloseIsIdempotent(t *testing.T) {
 	db, err := New()
 	if err != nil {

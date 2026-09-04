@@ -136,6 +136,15 @@ echo "$out" | grep -q 'incomplete input' && fail "a multi-line trigger with an i
 echo "$out" | grep -qx '5' || fail "INSERT after the trigger did not take effect (got: $out)"
 pass "REPL: a multi-line CREATE TRIGGER with an internal CASE...END is accepted as one statement"
 
+# --- .import bulk-loads a CSV file, creating the table from its header
+# row when one doesn't already exist (spec §3, §5 use case 1: seed data) ---
+cp "$BIN" "$WORK/importer"
+printf 'a,b\n1,hello\n2,"quoted, value"\n' >"$WORK/seed.csv"
+out="$(printf '.import %s/seed.csv t\nSELECT a, b FROM t ORDER BY a;\n.exit\n' "$WORK" | "$WORK/importer")"
+echo "$out" | grep -qx '1|hello' || fail ".import row 1 did not come through correctly (got: $out)"
+echo "$out" | grep -qx '2|quoted, value' || fail ".import did not preserve a quoted comma-containing field (got: $out)"
+pass ".import: CSV data loads into a newly created table"
+
 # --- .overwrite persists into the running executable (spec §4, §7) ---
 cp "$BIN" "$WORK/ow"
 before_size=$(wc -c <"$WORK/ow")

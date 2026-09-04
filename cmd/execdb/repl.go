@@ -172,6 +172,8 @@ func (r *repl) handleDotCommand(line string) (exit bool) {
 		r.cmdSchema(args)
 	case ".dump":
 		r.cmdDump(args)
+	case ".import":
+		r.cmdImport(args)
 	case ".snapshot":
 		r.cmdSnapshot(args)
 	case ".overwrite":
@@ -193,6 +195,7 @@ func printHelp() {
 .tables                   List names of tables
 .schema [TABLE]           Show CREATE statements
 .dump [PATTERN]           Render the schema and data as SQL text
+.import FILE TABLE        Import CSV data into TABLE, creating it if needed
 .snapshot [FILE] [--timestamp]
                           Write the current database to a new file
 .overwrite                Overwrite the running executable with the current

@@ -419,6 +419,39 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
   - `make check`・`make race`・`make test`（e2e、新規2件含め全項目PASS）
     とも green を確認済み。実機確認でトリガーの複数行入力（CASE式込み）が
     正しく1文として実行されることを確認済み
+- **フェーズ③Step 5（`.import`）完了（2026-09-04）。**
+  - `engine/session.go`: `Session.Prepare(query)` / `PrepareContext(ctx,
+    query)`を追加（このフェーズ2件目のengine変更。Step 4の`engine.Complete`
+    に続く）。`Session`の専有コネクション上でprepareした`*sql.Stmt`を返す
+    薄いラッパーで、1行ごとの`Exec`による毎回prepareのコストを避ける。
+    新規テスト`TestSessionPrepare`——prepare済み文が後から張った
+    トランザクション（`BEGIN`/`ROLLBACK`）にも正しく追従することを確認
+    （`Session`が専有コネクションであることの裏付け）
+  - `cmd/execdb/import.go`（新規）: `.import FILE TABLE`。**常にCSVとして
+    読む**（`.mode`には連動させない——sqlite3との意図的な相違、仕様書§3に
+    明記）。テーブル未存在なら1行目を列名として全TEXT列で自動`CREATE`、
+    存在すれば1行目からデータとして扱う。投入は`SAVEPOINT execdb_import`
+    で囲む（素の`BEGIN`ではなくSAVEPOINTにしたのは、ユーザーが既に`BEGIN`
+    済みの状態で`.import`しても壊れないようにするため）。**フィールド数が
+    列数と不一致の行があれば行番号付きエラーで処理全体を中断し、1行も
+    投入しない**（sqlite3は警告して継続するが、シードデータ投入という
+    主用途では歪んだデータが黙って入る方が有害と判断——意図的な相違、
+    仕様書§3に明記）
+  - `cmd/execdb/repl.go`: `.import`ディスパッチ・`.help`追記
+  - 新規テスト`import_test.go`（6件、全PASS）: ヘッダからの自動CREATE・
+    クォート/改行入りフィールド・既存テーブルへの投入（1行目もデータ扱い）・
+    フィールド数不一致時の全ロールバック・空ファイルでの新規テーブル
+    エラー・**ユーザーが既に開いていたトランザクションが`.import`後も
+    無事`COMMIT`できること**（SAVEPOINT設計の裏付け）
+  - e2eに`.import`→`SELECT`のチェックを追加（クォート・カンマ入りフィールド
+    含む）
+  - 仕様書§3（`.mode`の5モード確定表記、`.import`/`.dump`の相違点明記、
+    `.exit [CODE]`）・§6（`Session`に`Prepare`/`PrepareContext`追加）・
+    `.claude/rules/naming.md`（対応表に`s.Prepare`/`s.PrepareContext`行を
+    追加）を更新
+  - `make check`・`make race`・`make test`（e2e、全項目PASS）とも green
+    を確認済み。実機確認（クォート・改行入りCSV、既存テーブル投入、
+    フィールド数不一致時のロールバック）もすべて成功
 - 下準備として以下を作成済み（2026-09-03時点）:
   - `go.mod`（module: `github.com/amisonnet8/execdb`）
   - `LICENSE`（MIT, copyright: amisonnet8）

@@ -50,12 +50,12 @@ REPL と外部 I/F は、内部SQLエンジンに対する2つの独立したク
 | :--- | :--- |
 | `.tables` | テーブル一覧表示 |
 | `.schema [table]` | CREATE文（スキーマ）表示 |
-| `.exit` / `.quit` | REPL終了（自動保存は行わない。保存確認のプロンプトも出さず即座に終了する。§4参照） |
+| `.exit [CODE]` / `.quit [CODE]` | REPL終了（自動保存は行わない。保存確認のプロンプトも出さず即座に終了する。§4参照。`CODE`省略時は正常終了、指定時はそのコードで即座にプロセスを終了する） |
 | `.help` | コマンド一覧表示 |
 | `.headers on\|off` | 結果表示にカラム名を出すか |
-| `.mode MODE` | 出力形式（column/csv/json等） |
-| `.import FILE TABLE` | CSV等の外部ファイルをテーブルへ読み込む |
-| `.dump [table]` | テーブル（または全体）の内容をSQL文としてダンプする |
+| `.mode MODE` | 出力形式。`list`（既定、`\|`区切り・ヘッダなし）/`column`（列幅揃え、切替時`.headers`自動on）/`csv`（RFC 4180、CRLF）/`json`（配列。BLOBは16進文字列）/`line`（1列1行）の5種のみ採用する（`quote`/`insert`/`tabs`/`markdown`/`box`/`html`等の装飾系はCLI出力方針（`.claude/rules/cli-output.md`）により不採用） |
+| `.import FILE TABLE` | CSVファイルをテーブルへ読み込む。**`.mode`の設定に関わらず常にCSVとして読む**（sqlite3は`.mode`に連動するが、「`.import`は常にCSV」と単純化——意図的な相違）。`TABLE`が存在しなければ1行目を列名として全TEXT列で自動`CREATE`、存在すれば1行目からデータとして扱う。**行ごとのフィールド数が列数と一致しない場合はその行番号を含むエラーで処理全体を中断し、1行も投入しない**（sqlite3は警告のうえ補完/切り捨てして継続するが、シードデータ投入という主用途では黙って歪んだデータが入る方が有害と判断——意図的な相違） |
+| `.dump [PATTERN]` | `PATTERN`（SQLのLIKEパターン、省略時は全テーブル）に一致するテーブルのスキーマ・データと、それらに属するindex/view/triggerをSQL文としてダンプする。値のリテラル化はSQLite自身の`quote()`関数に委譲する |
 
 `.import` / `.dump` は、外部データ連携用途に加えて、**開発・テスト時にシードデータの投入や状態のスナップショット確認に使える**ため採用する。
 
@@ -223,6 +223,12 @@ func (s *Session) Exec(query string, args ...any) (sql.Result, error)
 func (s *Session) Query(query string, args ...any) (*sql.Rows, error)
 func (s *Session) QueryRow(query string, args ...any) *sql.Row
 // 上記それぞれの *Context 版、および db.Exec 等自体の *Context 版もある。
+
+// 同じ文を繰り返し実行する呼び出し元（cmd/execdbの.importによる
+// CSV一括投入等）向けに、このSessionの専有コネクション上でprepareした
+// *sql.Stmt を返す。
+func (s *Session) Prepare(query string) (*sql.Stmt, error)
+func (s *Session) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
 
 // 使い終えたら明示的に Close する（idempotent）。
 func (s *Session) Close() error

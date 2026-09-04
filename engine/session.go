@@ -45,6 +45,18 @@ func (s *Session) QueryRowContext(ctx context.Context, query string, args ...any
 	return s.conn.QueryRowContext(ctx, query, args...)
 }
 
+// Prepare and PrepareContext return a *sql.Stmt bound to this Session's
+// own connection, for callers that run the same statement many times
+// (e.g. bulk-loading a CSV file's rows, cmd/execdb's ".import") and want
+// to avoid re-preparing it on every call.
+func (s *Session) Prepare(query string) (*sql.Stmt, error) {
+	return s.conn.PrepareContext(context.Background(), query)
+}
+
+func (s *Session) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
+	return s.conn.PrepareContext(ctx, query)
+}
+
 // Close releases the Session's connection, rolling back any transaction
 // left open on it (closing a *sql.Conn does this automatically). Close
 // is idempotent: a second call is a no-op that returns nil.
