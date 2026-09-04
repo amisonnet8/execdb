@@ -17,6 +17,7 @@ ExecDB では、REPLコマンド・CLI起動オプション・`engine`パッケ�
 | ─（ライブラリ専用、REPL/CLIの対応なし） | ─ | `engine.Open(path string)` / `engine.New()` |
 | ─（ライブラリ専用。`cmd/execdb`のREPLは起動時に1本、pgwireはTCP/UDS1接続につき1本を保持する） | ─ | `db.Session(ctx context.Context)` |
 | ─（ライブラリ専用、`.load`のio.Reader版） | ─ | `db.LoadFrom(r io.Reader)` |
+| ─（ライブラリ専用。REPLの内部実装（`completeStatements`）が入力が完結したか判定するのに使う） | ─ | `engine.Complete(sql string) (bool, error)` |
 
 `engine.OpenSelf()` / `engine.Open()` / `engine.New()` / `db.Session()` /
 `db.LoadFrom()` はDBの生成・ロード・接続取得方法であり、ユーザー操作に直接

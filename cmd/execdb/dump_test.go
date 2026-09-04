@@ -56,17 +56,15 @@ func TestDumpRoundTrip(t *testing.T) {
 	}
 	defer target.Close()
 
-	// Replayed via a single Exec call on the whole script, not the
-	// REPL's own line-based scanStatements: SQLite's own tokenizer
-	// (invoked once per Exec call on the full multi-statement text)
-	// correctly treats the ";" inside the trigger's BEGIN...END body as
-	// internal to that one CREATE TRIGGER statement, which
-	// scanStatements (access.go) does not attempt to do -- it only
-	// understands string/identifier literals and comments (Step 1), not
-	// compound-statement bodies. Piping a dump containing a trigger back
-	// into the REPL's own stdin is a known limitation for that reason;
-	// this test validates .dump's SQL text itself, which is the
-	// responsibility this step actually owns.
+	// Replayed via a single Exec call on the whole script rather than the
+	// REPL's own line-based reader: SQLite's own tokenizer (invoked once
+	// per Exec call on the full multi-statement text) has always
+	// correctly treated the ";" inside the trigger's BEGIN...END body as
+	// internal to that one CREATE TRIGGER statement. This test validates
+	// .dump's SQL text itself, independent of how it gets fed to SQLite
+	// -- examples/e2e.sh separately exercises piping a dump containing a
+	// TRIGGER into a fresh REPL's stdin, which needs completeStatements
+	// (complete.go, phase 3 Step 4) to work at all.
 	if _, err := target.Exec(dump); err != nil {
 		t.Fatalf("replaying the dump failed: %v\n--- dump ---\n%s", err, dump)
 	}

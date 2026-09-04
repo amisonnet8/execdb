@@ -110,20 +110,31 @@ pass ".load: imports data from another ExecDB file"
 
 # --- .dump renders schema+data as SQL text, replayable by piping it into
 # a fresh REPL process (spec §3, §5 use case 2: sharing a data state).
-# The seeded schema deliberately has no TRIGGER: the REPL's own
-# line-based statement reader (access.go's scanStatements) does not
-# understand a CREATE TRIGGER body's internal ";" the way SQLite's own
-# tokenizer does when a whole script is executed in one call, so a
-# trigger's dump cannot currently be replayed this way (see
-# cmd/execdb/dump_test.go's TestDumpRoundTrip, which instead validates
-# .dump's own SQL text directly against that same case). ---
+# The seeded schema includes a TRIGGER: replaying a dumped CREATE TRIGGER
+# through the REPL's own line-based statement reader only works because
+# of completeStatements (complete.go, phase 3 Step 4), which defers to
+# SQLite's own sqlite3_complete() to know a trigger body's internal ";"
+# isn't a statement boundary -- without it, this exact check would fail
+# with "SQL logic error: incomplete input". ---
 cp "$BIN" "$WORK/dumpsrc"
-dump_out="$(printf 'CREATE TABLE t(a INTEGER PRIMARY KEY AUTOINCREMENT, b TEXT);\nINSERT INTO t(b) VALUES (%s);\nINSERT INTO t(b) VALUES (NULL);\nCREATE INDEX idx_t_b ON t(b);\n.dump\n.exit\n' "'it''s'" | "$WORK/dumpsrc")"
+dump_out="$(printf 'CREATE TABLE t(a INTEGER PRIMARY KEY AUTOINCREMENT, b TEXT);\nINSERT INTO t(b) VALUES (%s);\nINSERT INTO t(b) VALUES (NULL);\nCREATE INDEX idx_t_b ON t(b);\nCREATE TRIGGER trg AFTER INSERT ON t BEGIN SELECT 1; END;\n.dump\n.exit\n' "'it''s'" | "$WORK/dumpsrc")"
 cp "$BIN" "$WORK/dumptarget"
 out="$(printf '%s\nSELECT a, b FROM t ORDER BY a;\n.exit\n' "$dump_out" | "$WORK/dumptarget")"
 echo "$out" | grep -qx "1|it's" || fail ".dump output did not replay the first row correctly (got: $out)"
 echo "$out" | grep -qx '2|' || fail ".dump output did not replay the NULL row correctly (got: $out)"
-pass ".dump: schema and data replay correctly when piped into a fresh REPL"
+echo "$dump_out" | grep -q 'CREATE TRIGGER trg' || fail ".dump output did not include the trigger"
+pass ".dump: schema (including a TRIGGER), index, and data replay correctly when piped into a fresh REPL"
+
+# --- completeStatements: a CREATE TRIGGER typed directly into the REPL
+# (not via .dump) across several lines, with a CASE...END expression
+# inside the trigger body -- the case a naive BEGIN/END depth counter
+# cannot handle safely, since CASE's END has no matching BEGIN of its
+# own (spec §3, PLAN.md phase 3 Step 4) ---
+cp "$BIN" "$WORK/trigsrc"
+out="$(printf 'CREATE TABLE t(a);\nCREATE TRIGGER trg AFTER INSERT ON t BEGIN\nSELECT CASE WHEN NEW.a > 0 THEN 1 ELSE 0 END;\nEND;\nINSERT INTO t VALUES (5);\nSELECT * FROM t;\n.exit\n' | "$WORK/trigsrc")"
+echo "$out" | grep -q 'incomplete input' && fail "a multi-line trigger with an internal CASE...END was not accepted by the REPL"
+echo "$out" | grep -qx '5' || fail "INSERT after the trigger did not take effect (got: $out)"
+pass "REPL: a multi-line CREATE TRIGGER with an internal CASE...END is accepted as one statement"
 
 # --- .overwrite persists into the running executable (spec §4, §7) ---
 cp "$BIN" "$WORK/ow"

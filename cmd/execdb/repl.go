@@ -98,13 +98,14 @@ func (r *repl) run() {
 		buf.WriteString(line)
 		buf.WriteString("\n")
 
-		// scanStatements (access.go), not a bare ";" suffix check: it
-		// understands string/identifier literals and comments, so a ";"
-		// inside a literal (or a whole statement typed across several
-		// lines) does not falsely end -- or falsely fail to end -- the
-		// buffered input. remainder is only whitespace once every
-		// statement typed so far is properly terminated.
-		complete, remainder := scanStatements(buf.String())
+		// completeStatements (complete.go), not a bare ";" suffix check:
+		// it understands string/identifier literals, comments, and (via
+		// SQLite's own sqlite3_complete()) CREATE TRIGGER's BEGIN...END
+		// body, so a ";" inside any of those does not falsely end -- or
+		// falsely fail to end -- the buffered input. remainder is only
+		// whitespace once every statement typed so far is properly
+		// terminated.
+		complete, remainder := completeStatements(buf.String())
 		if strings.TrimSpace(remainder) != "" {
 			continue
 		}

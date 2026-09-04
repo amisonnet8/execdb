@@ -365,8 +365,8 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
        `sess.Exec()`への一括流し込みで検証済み——問題は`.dump`の出力側
        ではなく、REPL入力側の受け取り方にある）。トリガーを含むDBを
        REPL標準入力へ直接ペースト・パイプする運用は、この制約を踏む
-       可能性がある。対応する場合は新しいルール
-       （`.claude/rules/`への追記）または新規Stepとして提案する
+       可能性がある。**→ ユーザー指示によりStep 4として新規追加し解決済み
+       （下記「フェーズ③Step 4」参照）。**
     2. **`gofmt -s`（Go 1.26.7で確認）は、宣言直前のdocコメント内に隣接する
        `''`（アポストロフィ2つ）があると、これを単一の右巻きクォート文字
        `”`（U+201D）へ書き換える。** これは`go/doc/comment`パッケージによる
@@ -376,8 +376,49 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
        （`dump.go`のコメントで実際に踏んだ）。**回避策: docコメント内で
        `''`を隣接させず、単語で説明する**（本セッションでは実施済み）。
        このプロジェクトの`fmt-check`は`gofmt -s -l .`を使うため、
-       CIでも同じ書き換えが必要になる——`.claude/rules/`への追記を提案する
-       （どのファイルが適切かは要検討。`testing.md`または新規ファイル）
+       CIでも同じ書き換えが必要になる。**→ `.claude/rules/testing.md`に
+       「`gofmt -s`のdocコメント整形時の落とし穴」節として追記済み**
+       （新規ファイルではなくtesting.mdを選択——既存の「GitHub Actions
+       CI設定時の落とし穴」節と同種の「ビルド・CIツールチェーンの挙動を
+       実測して記録する」カテゴリであり、単発の狭い気づきのために新規
+       ファイルを作る基準には満たないと判断）
+- **フェーズ③Step 4（REPLの複合文対応・`sqlite3_complete`統合）完了
+  （2026-09-04）。** Step 3で見つかった「REPLの文スキャナがCREATE TRIGGERの
+  BEGIN...ENDを理解できない」制限への対応（ユーザー指示により計画へ新規
+  追加。当初計画のStep 4以降は5/6/7へ繰り下げ）。
+  - `engine/complete.go`（新規）: `Complete(sql string) (bool, error)`。
+    `modernc.org/sqlite/lib`（`Xsqlite3_complete`）＋`modernc.org/libc`
+    （`NewTLS`/`CString`/`Xfree`）経由で本家`sqlite3` CLIと同じ
+    `sqlite3_complete()`をそのまま呼ぶ。ナイーブなBEGIN/END深さカウントは
+    CASE式のENDと衝突するリスクがあるため不採用とし、本家のトークナイザに
+    判定を委譲する設計とした（実測でCASE式とトリガー本体終端のENDを正しく
+    区別することを確認済み——下記テストケース参照）。**新規の外部依存の
+    追加ではない**（`modernc.org/libc`・`modernc.org/sqlite/lib`は
+    `modernc.org/sqlite`自身の既存の推移的依存、`go.sum`変更なし）。
+    `directory-structure.md`の境界に従い、`modernc.org/sqlite`内部への
+    アクセスは`engine`パッケージに閉じ込めた
+  - `cmd/execdb/complete.go`（新規）: `completeStatements(sqlText string)
+    (complete []string, remainder string)`。`scanStatements`の
+    quote/comment考慮済み候補境界（`;`の位置）を`engine.Complete`で
+    1つずつ検証し直し、トリガー本体内の`;`を正しく除外する
+  - `cmd/execdb/repl.go`: `run()`のループが`scanStatements`ではなく
+    `completeStatements`を使うよう変更
+  - 新規テスト: `engine/complete_test.go`（空文字列・コメントのみ・通常文・
+    複数文・トリガーのCASE入り本体の完了/未完了、全PASS）、
+    `cmd/execdb/complete_test.go`（`completeStatements`がトリガー本体を
+    1つの文として返すことを確認）
+  - e2eに2件追加: `.dump`のスキーマにTRIGGERを含めて別プロセスのREPLへ
+    パイプし正しく再生されることを確認（Step 3では既知の制限としていた
+    ケースがこれで解決）／トリガーをREPLへ複数行に分けて直接入力し、
+    本体内に`CASE WHEN ... END`を含んでいても1つの文として正しく実行
+    されることを確認
+  - `.claude/rules/sqlite-quirks.md`に`modernc.org/sqlite/lib`への直接
+    依存の性質（生成コードで公開APIの保証がない、バージョンアップ時の
+    確認事項）を新節として追記。`.claude/rules/naming.md`の対応表に
+    `engine.Complete(sql string) (bool, error)`（ライブラリ専用）を追加
+  - `make check`・`make race`・`make test`（e2e、新規2件含め全項目PASS）
+    とも green を確認済み。実機確認でトリガーの複数行入力（CASE式込み）が
+    正しく1文として実行されることを確認済み
 - 下準備として以下を作成済み（2026-09-03時点）:
   - `go.mod`（module: `github.com/amisonnet8/execdb`）
   - `LICENSE`（MIT, copyright: amisonnet8）
@@ -753,22 +794,28 @@ REPL開発フェーズは、以下のステップで進める（2026-09-04、計
    `format.go`を全面書き換え。
 3. **Step 3: `.dump`** — スキーマ＋データをSQL文として出力。リテラル化はSQLite自身の
    `quote()`に委譲（自前エスケープ実装はしない）。
-4. **Step 4: `.import`** — CSV読み込み、テーブル未存在時は自動CREATE、SAVEPOINTで
-   一括投入。**`engine.Session`に`Prepare`/`PrepareContext`を追加**（フェーズ③唯一の
-   engine変更）。
-5. **Step 5: `--snapshot-interval`とCtrl+C** — `-i`のティッカーgoroutine、保存経路
+4. **Step 4: REPLの複合文対応（`sqlite3_complete`統合）** — Step 3で発覚した
+   「REPLの文スキャナがCREATE TRIGGERのBEGIN...ENDを理解できない」問題への対応
+   （当初計画外、Step 3完了後にユーザー指示で追加）。ナイーブなBEGIN/END深さカウントは
+   CASE式のENDと衝突するリスクがあるため不採用とし、本家`sqlite3`と同じ
+   `sqlite3_complete()`（`modernc.org/sqlite`経由、新規外部依存ではない）を
+   `engine.Complete(sql string) (bool, error)`として追加、REPL側は
+   `scanStatements`の候補境界をこれで検証し直す。
+5. **Step 5: `.import`** — CSV読み込み、テーブル未存在時は自動CREATE、SAVEPOINTで
+   一括投入。**`engine.Session`に`Prepare`/`PrepareContext`を追加**。
+6. **Step 6: `--snapshot-interval`とCtrl+C** — `-i`のティッカーgoroutine、保存経路
    （`.snapshot`/自動保存/`-i`）の共通ヘルパー化。Ctrl+Cはsqlite3の
    `interrupt_handler`と同じ状態機械（クエリ中断／アイドル1回目は継続／連続2回目で終了）。
    最大リスクのステップのため最後に配置。
-6. **Step 6: 仕様書・ルール・PLANへの反映** — §3/§6/§9/§10の反映、cli-output.md
+7. **Step 7: 仕様書・ルール・PLANへの反映** — §3/§6/§9/§10の反映、cli-output.md
    （出力モード・SIGINTの扱い）・naming.mdへの追記。
 
 **フェーズ③完了の判定:** `make check`/`make race`/`make test`が通る／`.mode`5種×
 `.headers`がsqlite3同等の書式／`.dump`の出力を空DBへ流し込むとラウンドトリップする／
-`.import`が自動CREATE・不一致時ロールバックを含めて動く／`-i`で定期スナップショットが
-生成される／実端末でCtrl+Cの状態機械（中断・継続・連続2回終了）が確認できる／
-GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と`.claude/rules/`が
-実装と一致している。
+トリガーを含むSQLをREPLへ直接複数行入力しても正しく1文として実行される／`.import`が
+自動CREATE・不一致時ロールバックを含めて動く／`-i`で定期スナップショットが生成される／
+実端末でCtrl+Cの状態機械（中断・継続・連続2回終了）が確認できる／GitHub Actions
+3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と`.claude/rules/`が実装と一致している。
 
 計画の全文は `/home/vscode/.claude/plans/step-step-step-crispy-graham.md` を参照
 （セッションログにも詳細が残る）。

@@ -230,3 +230,45 @@ BLOBを書き込んでいくと**約960MiB付近で`database or disk is full`
 本当に非ブロックで読めるか」を前提にせず、「有界に待った後、正しい最終状態が
 見える」ことをテストすること（`TestSessionTransactionIsolation`のように、
 読み取りをgoroutine化し、書き込み側のコミット後に結果を受け取る形にする）。
+
+## `modernc.org/sqlite/lib`（生成された内部パッケージ）への直接依存（フェーズ③Step 4）
+
+REPLの文スキャナ（`cmd/execdb/access.go`の`scanStatements`）は、リテラル・
+コメントは理解できるが`CREATE TRIGGER ... BEGIN ...; ... END`のような複合文
+本体は理解できない。ナイーブなBEGIN/END深さカウントで対処しようとすると、
+`CASE WHEN ... END`式のENDがBEGINを伴わないため、深さカウントを誤って
+トリガー本体を早期に「完了」と誤判定するリスクがある（実測で確認済み、
+下記参照）。
+
+**対処: 本家`sqlite3` CLIと同じ`sqlite3_complete()` C APIをそのまま呼ぶ。**
+`modernc.org/sqlite`のトップレベルパッケージ（`conn.go`等）はこれを公開
+していないが、`modernc.org/sqlite/lib`（パッケージ名`sqlite3`、
+`Xsqlite3_complete(tls *libc.TLS, zSql uintptr) int32`）に生成コードとして
+存在する。`modernc.org/libc`（`NewTLS()`/`CString()`/`Xfree()`）と組み合わせて
+呼び出せる（`engine/complete.go`の`Complete(sql string) (bool, error)`が
+このラッパー）。`sqlite3_complete`はDBハンドルを取らない純粋な文字列走査
+関数なので、生きているDBが無くても呼び出せる。
+
+**実測で確認した挙動（CASE式との衝突が起きないことの裏付け）:**
+
+```
+CREATE TRIGGER trg AFTER INSERT ON t BEGIN SELECT CASE WHEN 1 THEN 2 ELSE 3 END        -> false（トリガー本体は未完了、CASEのENDに惑わされない）
+CREATE TRIGGER trg AFTER INSERT ON t BEGIN SELECT CASE WHEN 1 THEN 2 ELSE 3 END; END;  -> true（トリガー本体を閉じる本物のENDを正しく認識）
+```
+
+**このアクセス経路の性質・注意点:**
+
+- **新規の外部依存の追加ではない。** `modernc.org/libc`・`modernc.org/sqlite/lib`は
+  どちらも`modernc.org/sqlite`自身が内部で使っている既存の推移的依存
+  （`go.sum`は変わらない。`Makefile`の`check-deps`が既に「`net`の推移的依存は
+  `modernc.org/libc`経由」と記録している依存そのもの）。
+- **`lib`は生成コード（transpileされたC実装）であり、`modernc.org/sqlite`が
+  ドキュメント化・安定性を保証する公開APIではない。** `directory-structure.md`
+  の「`modernc.org/sqlite`ラッパーは`engine`が担う」という一貫した境界に従い、
+  `cmd/execdb`側は`engine.Complete()`経由でのみ触れ、`modernc.org/sqlite/lib`・
+  `modernc.org/libc`を直接importしない。
+- **`modernc.org/sqlite`をバージョンアップする際は、`Xsqlite3_complete`の
+  シグネチャ・存在・`lib`パッケージのimportパスが変わっていないか確認する
+  こと。** 既存の`Raw()`＋ローカルinterfaceのトリック（Serialize/Deserialize/
+  Backup）と同様、バージョン間で壊れうる箇所として`engine/complete.go`の
+  コメントにも明記済み。
