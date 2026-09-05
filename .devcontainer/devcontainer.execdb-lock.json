@@ -1,0 +1,9 @@
+{
+  "features": {
+    "ghcr.io/dhoeric/features/trivy:1": {
+      "version": "1.0.0",
+      "resolved": "ghcr.io/dhoeric/features/trivy@sha256:c291ec03dd2938d1c4bc6cf87e6afab8067514fb000c9165bcc66a6f65092783",
+      "integrity": "sha256:c291ec03dd2938d1c4bc6cf87e6afab8067514fb000c9165bcc66a6f65092783"
+    }
+  }
+}
