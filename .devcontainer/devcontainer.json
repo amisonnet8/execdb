@@ -2,7 +2,10 @@
   "name": "execdb",
   "image": "mcr.microsoft.com/devcontainers/go:1.26-bookworm",
   "features": {
-    "ghcr.io/dhoeric/features/trivy:1": {}
+    "ghcr.io/dhoeric/features/trivy:1": {},
+    "ghcr.io/devcontainers/features/dotnet:2": {
+      "version": "8.0"
+    }
   },
   "customizations": {
     "vscode": {
@@ -19,7 +22,7 @@
       }
     }
   },
-  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y make postgresql-client python3-pip python3-psycopg2 nodejs npm openjdk-17-jdk-headless && go install golang.org/x/tools/gopls@latest && go install golang.org/x/tools/cmd/goimports@latest && go install golang.org/x/tools/cmd/stringer@latest",
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y make postgresql-client python3-pip python3-psycopg2 nodejs npm openjdk-17-jdk-headless unixodbc unixodbc-dev odbc-postgresql python3-pyodbc && go install golang.org/x/tools/gopls@latest && go install golang.org/x/tools/cmd/goimports@latest && go install golang.org/x/tools/cmd/stringer@latest",
   "remoteUser": "vscode",
   "containerEnv": {
     "CGO_ENABLED": "0"

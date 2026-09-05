@@ -13,8 +13,9 @@ commit like any other file.
 
 External clients (ORMs, DB tools, language drivers) can connect over a
 PostgreSQL-compatible wire protocol subset, so existing Postgres driver
-ecosystems (JDBC, psycopg, node-postgres, Npgsql, pgx, ...) work out of the
-box, with their own default connection settings.
+ecosystems (JDBC, psycopg, node-postgres, Npgsql, pgx, ...) work with little
+to no ExecDB-specific setup — see [`docs/spec/execdb_spec.md`](docs/spec/execdb_spec.md)
+§8 for the one documented exception (Npgsql).
 
 ## Install
 

@@ -78,6 +78,20 @@
   スクリプトごと即終了する」「`set -u`と組み合わせるとbash 5.2.15で
   `unbound variable`になる場合がある」という別の落とし穴があるため、
   ファイル経由での受け渡し自体は妥当な回避策である。
+- **裸の`exec`にリダイレクトを付けると、そのリダイレクトは現在のシェルへ
+  恒久的に適用される（`(...)`のようなサブシェルを介さない限り）。**
+  `tests/drivers/run-all.sh`が接続待ち受け確認用に開いたfd 3を閉じる際、
+  `exec 3>&- 3<&- 2>/dev/null || true`と書いていたところ、この
+  `2>/dev/null`はfdクローズ自体の警告を消すだけのつもりが、**スクリプト
+  全体の以後のstderrを永久に`/dev/null`へリダイレクトしてしまっていた**
+  （フェーズ④Step 7、Npgsql検証中に発覚——各ドライバチェックの
+  `FAIL - ...`メッセージも、ドライバ自身がクラッシュ時にstderrへ吐く
+  内容も、一切表示されなくなっていた）。**対処: `{ exec 3>&- 3<&-; }
+  2>/dev/null || true`とブレースでグループ化し、リダイレクトの適用範囲を
+  fdクローズ自体に限定する。** 裸の`exec ... N>...`はシェル自身の設定を
+  恒久的に書き換えるためのものであり、「このコマンドだけリダイレクトを
+  変えたい」という意図がある場合は、単一コマンドであっても必ず
+  `{ }`かサブシェル`( )`で明示的に囲むこと。
 
 ## GitHub Actions CI設定時の落とし穴（フェーズ①Step 5、初回push後に発覚）
 
@@ -197,20 +211,34 @@ Go 1.26.7の`gofmt -s`は、**関数/型/変数などの宣言に直接紐づく
 
 ## 他言語ドライバ検証の運用方針（フェーズ④Step 7）
 
-Python（psycopg2）・Node.js（node-postgres）・Java（pgJDBC）の3ドライバは、
-`tests/drivers/`配下にチェックスクリプトを置き、`tests/drivers/run-all.sh`
-（`tests/e2e.sh`とCIの`drivers`ジョブが共有する）から実行する。
+Python（psycopg2）・Node.js（node-postgres）・Java（pgJDBC）・.NET（Npgsql、
+当初は見送っていたが後日追加）・ODBC（psqlODBC、フェーズ④完了後にさらに
+追加）の5ドライバは、`tests/drivers/`配下にチェックスクリプトを置き、
+`tests/drivers/run-all.sh`（`tests/e2e.sh`とCIの`drivers`ジョブが共有する）
+から実行する。Npgsqlのみ、接続文字列に`Server Compatibility
+Mode=NoTypeLoading`が必要（`.claude/rules/pgwire.md`参照）——クライアント
+側の設定だけで見ると唯一「デフォルト設定のまま」では接続できない例外
+である。psqlODBCはクライアント側の設定は不要だが、`SQLTables`/
+`SQLColumns`まで動かすためにExecDBサーバー側へpg_catalog互換ビューを
+追加している（同参照）。
 
 - **ランタイムが無い環境ではスキップする（失敗扱いにしない）。**
   `run-all.sh`は各ランタイムを`command -v`で確認し、無ければ`skip -`行を
   出すだけで次のドライバへ進む——フェーズ③Step 6のPTY専用Ctrl+Cチェック
   （`script`コマンドが無い環境でスキップする）と同じ既存パターン。手元の
-  devcontainerには標準で入っていないため（`.devcontainer/devcontainer.json`の
-  `postCreateCommand`参照）、`make test`をまっさらな環境で実行しても
-  driversチェックだけがskipになりビルド自体は落ちない。
+  devcontainerには5つとも導入済み（Python/Node/Javaは
+  `.devcontainer/devcontainer.json`の`postCreateCommand`、.NETは
+  `ghcr.io/devcontainers/features/dotnet:2`フィーチャー経由、ODBCは
+  `unixodbc`/`unixodbc-dev`/`odbc-postgresql`/`python3-pyodbc`を
+  `postCreateCommand`へ追加）だが、devcontainer外でリポジトリを素の状態で
+  cloneした場合や、ランタイムの導入に失敗した環境では引き続きこの
+  スキップ挙動が効く——`make test`がそれだけでビルド自体を落とすことは
+  ない。ODBCのスキップ判定は`isql`（unixODBCの存在確認）＋
+  `odbcinst -q -d`が"postgresql"を含む行を返すか（ドライバ自体が
+  登録済みか）＋`python3 -c 'import pyodbc'`の3点セット。
 - **CIの`drivers`ジョブは`check`の3OSマトリクスには含めず、`ubuntu-latest`
   限定の別ジョブにする。** pgwireプロトコル実装自体はOS非依存（`-race`と
-  同じ理由付け）であり、3ランタイム×3OSを揃えるセットアップコストに
+  同じ理由付け）であり、5ランタイム×3OSを揃えるセットアップコストに
   見合わないと判断した。
 - **Node/Javaの依存（`node_modules/`、pgJDBCのjar）はリポジトリへ
   コミットしない。** `tests/drivers/node/run.sh`・`tests/drivers/java/run.sh`

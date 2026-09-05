@@ -19,6 +19,7 @@ ExecDB では、REPLコマンド・CLI起動オプション・`engine`パッケ�
 | ─（ライブラリ専用、`.load`のio.Reader版） | ─ | `db.LoadFrom(r io.Reader)` |
 | ─（ライブラリ専用。REPLの内部実装（`completeStatements`）が入力が完結したか判定するのに使う） | ─ | `engine.Complete(sql string) (bool, error)` |
 | ─（ライブラリ専用。`.import`のCSV一括投入が同じ文を繰り返し実行するのに使う） | ─ | `s.Prepare(query string)` / `s.PrepareContext(ctx, query string)` |
+| ─（ライブラリ専用。`cmd/execdb`のpgwire層がODBC対応のpg_catalog互換ビュー用にPostgres組み込み関数を登録するのに使う。`engine`自体はPostgresの存在を知らない） | ─ | `engine.RegisterScalarFunction(name string, nArgs int32, fn ...)` |
 | `.mode` | ─ | ─ |
 | `.headers` | ─ | ─ |
 | `.dump` | ─ | ─ |

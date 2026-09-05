@@ -84,12 +84,17 @@ func (eq *extendedQueryConn) closeAll() {
 // (spec §2's access control applies here, at parse time, exactly like
 // Simple Query's checkExternalAccess) and stores the result under name.
 // SQLite accepts Postgres-style "$1"/"$2" placeholders natively (phase 4
-// Step 1's spike), so query needs no rewriting before being prepared.
+// Step 1's spike), so query needs no rewriting for that. It does still go
+// through rewritePGCatalogQuery (pgcatalog.go, phase 4 follow-up), the
+// same as Simple Query, in case a client ever sends a pg_catalog-
+// qualified query this way instead of as a plain Query message (none of
+// the drivers tested so far do, but Parse is the more general path).
 func handleParse(ctx context.Context, w io.Writer, sess *engine.Session, eq *extendedQueryConn, body []byte) (ok bool, err error) {
 	name, query, paramOIDs, parsed := parseParseMessage(body)
 	if !parsed {
 		return false, writeErrorResponse(w, sqlstateGeneric, "malformed Parse message")
 	}
+	query = rewritePGCatalogQuery(query)
 	if aerr := checkExternalAccess(query); aerr != nil {
 		return false, writeErrorResponse(w, sqlstateInsufficientPrivilege, aerr.Error())
 	}
@@ -394,8 +399,10 @@ func handleDescribe(ctx context.Context, w io.Writer, sess *engine.Session, eq *
 		}
 		// nil resultFormats: no Bind has happened yet for a
 		// statement-level Describe, so there is no requested format to
-		// honor -- real PostgreSQL always reports text here too.
-		return describeRowShape(ctx, w, sess, ps, nil)
+		// honor -- real PostgreSQL always reports text here too. No Bind
+		// means no real parameter values either, so the trial run below
+		// binds every placeholder to NULL (args left nil).
+		return describeRowShape(ctx, w, sess, ps, nil, nil)
 	case 'P':
 		p, exists := eq.portals[name]
 		if !exists {
@@ -405,27 +412,40 @@ func handleDescribe(ctx context.Context, w io.Writer, sess *engine.Session, eq *
 		if !exists {
 			return false, writeErrorResponse(w, sqlstateGeneric, fmt.Sprintf("prepared statement %q does not exist", p.stmtName))
 		}
-		return describeRowShape(ctx, w, sess, ps, p.resultFormats)
+		// A portal-level Describe follows Bind, so p.args holds real
+		// parameter values -- trial-running with those (instead of NULL)
+		// lets columnOID's ScanType fallback see a real typed value for
+		// pass-through expression columns like "SELECT $1", matching real
+		// PostgreSQL (which plans such a column's type from the
+		// client-declared parameter type, not "unknown"/text).
+		return describeRowShape(ctx, w, sess, ps, p.resultFormats, p.args)
 	default:
 		return false, writeErrorResponse(w, sqlstateGeneric, "malformed Describe message: unknown target")
 	}
 }
 
 // describeRowShape answers a Describe's row-shape half (RowDescription or
-// NoData) for ps. For a row-returning statement, it trial-executes ps with
-// every placeholder bound to NULL, wrapped in a SAVEPOINT/ROLLBACK: phase
-// 4 Step 1's spike found SQLite still reports each declared column's
-// decltype-based ColumnTypes() correctly even with zero matching rows
-// (PLAN.md's "フェーズ④Step 1で確定した事実"), which is exactly the
-// column-shape information Describe needs -- without requiring the real
-// parameter values Bind alone would provide, and without any new engine
-// API. The SAVEPOINT is a safety net in case a statement looksLikeRowReturning
-// missed (e.g. some RETURNING-clause variant) actually mutates data; it
-// costs nothing when, as expected, the trial run only reads. resultFormats
-// is nil for a statement-level Describe (no Bind has happened yet, so
-// real PostgreSQL always reports text there) or a portal's Bind-supplied
-// format-code request for a portal-level Describe (buildResultColumns).
-func describeRowShape(ctx context.Context, w io.Writer, sess *engine.Session, ps *preparedStatement, resultFormats []int16) (ok bool, err error) {
+// NoData) for ps. For a row-returning statement, it trial-executes ps
+// wrapped in a SAVEPOINT/ROLLBACK: phase 4 Step 1's spike found SQLite
+// still reports each declared column's decltype-based ColumnTypes()
+// correctly even with zero matching rows (PLAN.md's "フェーズ④Step 1で
+// 確定した事実"), which is exactly the column-shape information Describe
+// needs, without any new engine API. The SAVEPOINT is a safety net in
+// case a statement looksLikeRowReturning missed (e.g. some
+// RETURNING-clause variant) actually mutates data; it costs nothing when,
+// as expected, the trial run only reads. resultFormats is nil for a
+// statement-level Describe (no Bind has happened yet, so real PostgreSQL
+// always reports text there) or a portal's Bind-supplied format-code
+// request for a portal-level Describe (buildResultColumns). args is nil
+// (every placeholder trial-bound to NULL) for a statement-level Describe,
+// or the portal's real Bind values for a portal-level one -- using the
+// real values there lets columnOID's ScanType fallback see an actual
+// typed value for pass-through expression columns like "SELECT $1"
+// (phase 4 Step 7, discovered via Npgsql: it plans such a column's type
+// from the request's own declared parameter type, unlike other verified
+// drivers, which tolerate ExecDB's NULL-trial-run text fallback because
+// their result getters coerce a string back to the requested type).
+func describeRowShape(ctx context.Context, w io.Writer, sess *engine.Session, ps *preparedStatement, resultFormats []int16, args []any) (ok bool, err error) {
 	if !ps.rowReturning {
 		return true, writeNoData(w)
 	}
@@ -433,7 +453,9 @@ func describeRowShape(ctx context.Context, w io.Writer, sess *engine.Session, ps
 	if _, serr := sess.ExecContext(ctx, "SAVEPOINT execdb_describe"); serr != nil {
 		return false, writeErrorResponse(w, sqlstateGeneric, serr.Error())
 	}
-	args := make([]any, ps.numParams)
+	if args == nil {
+		args = make([]any, ps.numParams)
+	}
 	rows, qerr := ps.stmt.QueryContext(ctx, args...)
 	rerr := rollbackDescribeSavepoint(ctx, sess)
 	if qerr != nil {

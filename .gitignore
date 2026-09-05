@@ -31,3 +31,5 @@ go.work.sum
 /tests/drivers/node/node_modules/
 /tests/drivers/java/lib/
 /tests/drivers/java/out/
+/tests/drivers/dotnet/bin/
+/tests/drivers/dotnet/obj/

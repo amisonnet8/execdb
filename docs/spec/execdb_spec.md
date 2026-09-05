@@ -375,7 +375,7 @@ db.Close()
 
 ## 8. 外部 I/F プロトコル仕様（PostgreSQL互換ワイヤープロトコル）
 
-外部 I/F は、独自プロトコルを新規に定義するのではなく、**PostgreSQLワイヤープロトコル(v3)のサブセット**を実装する方式を採用する。これにより、JDBC(pgJDBC)、Python(psycopg)、Node.js(node-postgres)、.NET(Npgsql)、Go(pgx)など、各言語で既に確立されたPostgreSQL用ドライバ資産が、ExecDB側の追加対応なしにそのまま接続できる。CockroachDB・YugabyteDBなど新興分散DBが採用しているのと同じ戦略である。**pgx・pgJDBC・psycopg・node-postgresの4つは、各ドライバ自身のデフォルト接続設定のまま接続・SELECT/DML/トランザクション・DDL拒否が動くことを実機で確認済み（フェーズ④Step 5・7、`tests/pgclient`・`tests/drivers/`）。Npgsqlのみ未検証だが、常にExtended Queryプロトコルを使う実装であるため、フェーズ④Step 5でExtended Queryを採用した時点で接続自体は可能になっているはずという前提で申し送る。**
+外部 I/F は、独自プロトコルを新規に定義するのではなく、**PostgreSQLワイヤープロトコル(v3)のサブセット**を実装する方式を採用する。これにより、JDBC(pgJDBC)、Python(psycopg)、Node.js(node-postgres)、.NET(Npgsql)、Go(pgx)、ODBC(psqlODBC)など、各言語・各インターフェースで既に確立されたPostgreSQL用ドライバ資産が、ExecDB側の追加対応なしにそのまま接続できる。CockroachDB・YugabyteDBなど新興分散DBが採用しているのと同じ戦略である。**pgx・pgJDBC・psycopg・node-postgres・Npgsql・psqlODBCの6つすべてで、接続・SELECT/DML/トランザクション・DDL拒否が動くことを実機で確認済み（フェーズ④Step 5・7、フェーズ④完了後の追加検証、`tests/pgclient`・`tests/drivers/`）。ただしNpgsqlのみ、各ドライバ自身の「デフォルト接続設定のまま」という前提が崩れる——接続文字列に`Server Compatibility Mode=NoTypeLoading`の指定が必要（詳細は下記）。他の5つはこの種の指定なしに接続できる。psqlODBCはクライアント側の指定は不要だが、`SQLTables`/`SQLColumns`（テーブル一覧・列一覧を返すODBC標準API、Excel/Power BI/Access等が使う）まで動かすため、ExecDBサーバー側にPostgresシステムカタログ（`pg_type`/`pg_class`/`pg_namespace`/`pg_attribute`等）互換のビュー・関数を追加している（`cmd/execdb/pgcatalog.go`、詳細は`.claude/rules/pgwire.md`）。**
 
 ### 採用範囲（サブセット）
 
@@ -402,7 +402,58 @@ SQLiteは`$1`形式のプレースホルダをネイティブに解釈できる�
 （実測確認済み）、SQL文の書き換え層は不要。`Describe`（statement）が要求する
 実行前の結果列情報は、全プレースホルダにNULLを仮バインドした試験実行
 （SAVEPOINT/ROLLBACKで囲む）から`ColumnTypes()`を読み取ることで得ており、
-`engine`側への新規API追加は不要だった。
+`engine`側への新規API追加は不要だった。**`Describe`（portal、Bind後）は
+NULLではなく、そのポータルの実際のBind値を仮バインドに使う**——`SELECT $1`
+のようなプレースホルダそのものが結果列になる式では、実際の値を通した方が
+`columnOID`のScanTypeフォールバックが正しい型を検出できる（real PostgreSQL
+自身も、クライアントが`Parse`で申告したパラメータ型からこの種の列の型を
+決定する）。当初はstatement/portal共通でNULL仮バインドのみだったが、
+フェーズ④Step 7でNpgsqlを検証した際、`SELECT $1`列がOID 25(text)に
+フォールバックしてしまい、`ExecuteScalarAsync()`の厳格な型キャストが失敗する
+形で発覚した（pgJDBC/node-postgresは値取得API側が文字列を暗黙変換するため
+表面化していなかった）。
+
+**Npgsqlが接続すらできなかった経緯・原因（フェーズ④Step 7、実機確認で判明）:**
+Extended Query採用（Step 5）により`unsupported message type 'P'`は解消した
+はずだったが、実際にNpgsqlをデフォルト設定のまま接続すると
+`SQL logic error: no such function: version`で失敗した。原因は、Npgsqlの
+接続確立処理が独自に「型カタログのブートストラップ」を行うため——
+`SELECT version();`に続けて、`pg_type`/`pg_namespace`/`pg_class`/`pg_proc`/
+`pg_range`/`pg_attribute`/`pg_enum`という実在のPostgresシステムカタログを
+対象にした複数のSELECTを1つのSimple Queryメッセージとしてバッチ送信して
+くる。SQLiteにはこれらの関数・テーブルが一切無いため、接続確立の時点で
+最初の1文から失敗する。pgx/psycopg/node-postgres/pgJDBCはいずれもこの種の
+ブートストラップを行わない（デフォルト設定では発生しない）ため、この問題は
+Npgsql固有だった。**対処: 接続文字列に`Server Compatibility Mode=NoTypeLoading`
+を指定する**（CockroachDB・Redshift等、実物のPostgresでない互換DBに接続する
+際にNpgsqlが公式に案内している標準機能——ExecDB独自のパッチではない）。
+これを指定するとNpgsqlは型カタログのブートストラップ自体をスキップし、
+組み込みの既知型（int4/text/bool等）だけで動作するため、この問題を
+根本的に回避できる。`tests/drivers/dotnet/run.sh`の呼び出し元
+（`tests/drivers/run-all.sh`）がこの接続文字列パラメータを付与している。
+
+**psqlODBC（ODBC）対応で追加したpg_catalog互換ビュー（フェーズ④完了後の
+追加、実機確認で判明）:** psqlODBCは接続直後に実在のPostgresシステム
+カタログ`pg_type`へラージオブジェクト型の有無を問い合わせ、また
+`SQLTables`/`SQLColumns`（Excel/Power BI/Access等が使う、テーブル一覧・
+列一覧を返すODBC標準API）は`pg_class`/`pg_namespace`/`pg_attribute`/
+`pg_attrdef`への本格的なJOINクエリと`pg_get_expr()`/`current_schema()`
+関数呼び出しを送ってくる。SQLiteにはこれらが一切無いため、そのままでは
+接続もスキーマブラウズもできない。**対処: ExecDBの実スキーマ
+（`sqlite_master`・`pragma_table_info()`）から動的に導出する
+`TEMP`ビュー・テーブルを、pgwire接続ごとに用意する**
+（`cmd/execdb/pgcatalog.go`）。実データを一切汚染せず（`.tables`/`.dump`/
+スナップショットに現れない）、スキーマ変更後も常に最新の状態を反映する。
+クライアントが送ってくる`pg_catalog.pg_class`のようなスキーマ修飾付き
+参照は、サーバー側で`pg_catalog.`という文字列を除去してから実行することで
+吸収している（SQLiteのVIEWは別データベースのオブジェクトを参照できない
+という制約があり、`ATTACH DATABASE ... AS pg_catalog`した独立スキーマに
+`main`参照ビューを置く案は不採用——詳細な経緯は`.claude/rules/pgwire.md`
+参照）。`current_schema()`/`pg_get_expr()`は`engine.RegisterScalarFunction`
+（新設、`modernc.org/sqlite`のカスタム関数登録APIの薄いラッパー）経由で
+登録している。制約・インデックス・トリガー・複数スキーマは対象外——
+基本的な接続・型付きクエリ・スキーマブラウズが実スキーマに対して動く
+ことがゴールであり、本格的なPostgresシステムカタログの再現ではない。
 
 **結果値のバイナリ形式が必要になった経緯（フェーズ④Step 5、実機確認で判明）:**
 テキスト形式のみで実装したところ、`pgx`のデフォルト（Extended Query）接続で

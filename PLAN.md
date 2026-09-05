@@ -1640,4 +1640,109 @@ Extended Queryプロトコル——はStep 2〜7ですべて消化済み。フ�
     `openjdk-17-jdk-headless`/`python3-psycopg2`は、フェーズ④Step 8で
     `.devcontainer/devcontainer.json`の`postCreateCommand`へ反映済み。
     Node/Javaの依存（`pg`パッケージ、pgJDBCのjar）は`tests/drivers/`配下の
-    gitignore済みの場所へ都度取得する設計のため、コンテナへの恒久化対象外）
+    gitignore済みの場所へ都度取得する設計のため、コンテナへの恒久化対象外。
+    フェーズ④完了後に追加した.NET/Npgsql検証（下記）の`dotnet` SDKは、
+    features経由（`ghcr.io/devcontainers/features/dotnet:2`）で
+    devcontainer.jsonへ即時反映済み）
+
+## フェーズ④完了後の追加: .NET(Npgsql)ドライバ検証（2026-09-05）
+
+フェーズ④Step 7では計画通り.NET（Npgsql）を見送っていたが、全フェーズ完了後に
+改めて着手した。`tests/drivers/dotnet/`（`Check.csproj`・`Program.cs`・
+`run.sh`）を新設し、他3ドライバと同じ構成（SELECT型チェック・DDL拒否
+SQLSTATE 42501・INSERT+COMMIT+SELECT往復）を追加。`tests/drivers/run-all.sh`・
+`tests/e2e.sh`・`.github/workflows/test.yml`（`actions/setup-dotnet@v6`,
+dotnet-version 8.0.x）へ組み込み、`.devcontainer/devcontainer.json`へ
+`ghcr.io/devcontainers/features/dotnet:2`（version 8.0）を追加した。
+
+**実機検証で判明した、計画時には想定していなかった2つの新事実**（詳細は
+`.claude/rules/pgwire.md`「Npgsqlは接続文字列に`Server Compatibility
+Mode=NoTypeLoading`が必要」節）:
+
+1. **Npgsqlは接続確立時に独自の型カタログブートストラップ（`SELECT
+   version()`+`pg_type`/`pg_enum`等の実在カタログへのSELECT）を送る。**
+   SQLiteにはこれらが無いため、Extended Query実装済み（Step 5）でも
+   デフォルト設定のままでは接続そのものが失敗する。対処として接続文字列に
+   `Server Compatibility Mode=NoTypeLoading`（Npgsql公式の標準オプション、
+   CockroachDB等でも案内されている）を指定する必要があり、**Npgsqlだけは
+   他4ドライバ（pgx/pgJDBC/psycopg/node-postgres）と違い「デフォルト設定の
+   まま」では接続できない**唯一の例外として`execdb_spec.md`§8・
+   `tests/drivers/README.md`に明記した。
+2. **副次的に発見した既存の設計上のギャップ**: `SELECT $1`のような
+   プレースホルダそのものが結果列になる問い合わせで、`describeRowShape`
+   （`pgextended.go`）がstatement/portal両方のDescribeで常にNULL仮バインド
+   していたため、結果列のOIDがtext(25)にフォールバックしていた。pgJDBC/
+   node-postgresは値取得側が文字列を許容するため無害だったが、Npgsqlの
+   厳密な`ExecuteScalarAsync()`は`InvalidCastException`で失敗した。
+   **portal-level Describe（Bind後）では実際のBind値を仮バインドに使うよう
+   修正**——real PostgreSQL自身の挙動（クライアント申告のパラメータ型から
+   列の型を決定）に近づく形の、pgwire実装全体に効く改善。
+
+**テストインフラ側で見つかった、無関係な既存の潜在バグも合わせて修正**:
+`tests/drivers/run-all.sh`の`exec 3>&- 3<&- 2>/dev/null || true`が、
+ブレースで囲まれていない裸の`exec`のためスクリプト全体のstderrを以後
+永久に`/dev/null`へリダイレクトしてしまっており（Npgsqlのクラッシュ出力が
+一切見えず原因調査が難航して発覚）、`{ exec 3>&- 3<&-; } 2>/dev/null ||
+true`へ修正した。python/node/javaは元々失敗したことがなかったため
+今回まで無症状だった。
+
+**確認**: `make check`・`make race`・`make test`（4ドライバすべて`ok`）とも
+green。
+
+## フェーズ④完了後の追加: ODBC（psqlODBC）ドライバ検証（2026-09-05）
+
+.NET(Npgsql)追加の直後、続けてODBC対応も可能か調査してほしいという要望を
+受けた。実機調査の結果を「Tier 1（軽量、基本接続のみ）」「Tier 2（重い、
+`SQLTables`/`SQLColumns`まで含む）」に切り分けてユーザーへ提示し、
+**両方実装する**方針で確定した（AskUserQuestion）。
+
+`tests/drivers/odbc/check.py`（pyodbc、SELECT型チェック・DDL拒否
+SQLSTATE 42501・INSERT+COMMIT+SELECT往復に加え、`cursor.tables()`/
+`cursor.columns()`まで検証）を新設し、`tests/drivers/run-all.sh`・
+`tests/e2e.sh`・`.github/workflows/test.yml`（`unixodbc`/`unixodbc-dev`/
+`odbc-postgresql`のapt導入＋`pip install pyodbc`）・
+`.devcontainer/devcontainer.json`（同パッケージを`postCreateCommand`へ
+追加）へ組み込んだ。
+
+**実装した内容（`cmd/execdb/pgcatalog.go`新設・`engine/function.go`新設）:**
+
+- psqlODBCは接続直後に実在のPostgresシステムカタログ`pg_type`へ
+  ラージオブジェクト型の有無を問い合わせ、`SQLTables`/`SQLColumns`は
+  `pg_class`/`pg_namespace`/`pg_attribute`/`pg_attrdef`への本格的な
+  JOINクエリと`pg_get_expr()`/`current_schema()`関数呼び出しを送る。
+  SQLiteにはこれらが一切無いため、そのままでは接続もスキーマブラウズも
+  できない。
+- **対処**: ExecDBの実スキーマ（`sqlite_master`・`pragma_table_info()`）から
+  動的に導出する`TEMP`ビュー・テーブルを、pgwire接続ごとに用意する
+  （実データを一切汚染せず、`.tables`/`.dump`/スナップショットに現れない）。
+- **実装中に判明した設計変更（詳細は`.claude/rules/pgwire.md`参照）**:
+  1. 当初案（`ATTACH DATABASE ':memory:' AS pg_catalog`した独立スキーマに
+     `main`参照ビューを置く）は、SQLiteの「VIEWは別データベースの
+     オブジェクトを参照できない」という制約（実測で発覚）により却下し、
+     `main`を自由に参照できる`TEMP`ビューへ設計変更した。
+  2. クライアントが送ってくる`pg_catalog.pg_class`のようなスキーマ修飾付き
+     参照は、`pg_catalog`という名のデータベースが実在しないと解決できない
+     ため、サーバー側で`pg_catalog.`という文字列を除去してから実行する
+     `rewritePGCatalogQuery`を`handleSimpleQuery`/`handleParse`双方に追加した。
+  3. `SELECT * FROM (VALUES ...) AS v(col1, col2, ...)`という派生テーブルの
+     列名エイリアス構文はSQLite未対応（`near "(": syntax error`）と判明し、
+     `pg_type`だけは`CREATE TEMP TABLE`+`INSERT`の実テーブルにした。
+  4. `engine.DB.Session`が`database/sql`の標準コネクションプールから物理
+     コネクションを配るため（TEMPオブジェクトは論理Sessionでなく物理
+     コネクションの寿命に紐づく）、2本目以降のpgwire接続が同じ物理
+     コネクションを再利用すると`CREATE TEMP VIEW`が「already exists」で
+     失敗した。`sqlite_temp_master`を見てべき等にする
+     `pgCatalogAlreadyAttached`を追加して解決した。
+  5. `SQLColumns`の実クエリをそのままREPLで再現して初めて、
+     `pg_attribute`に`atthasdef`列を用意し忘れていたことが判明した。
+- `current_schema()`/`pg_get_expr()`は新設の`engine.RegisterScalarFunction`
+  （`modernc.org/sqlite`の安定版トップレベルパッケージが提供する
+  カスタム関数登録APIの薄いラッパー、`Complete`が使う生成コード
+  `modernc.org/sqlite/lib`とは異なりバージョン間の破壊的変更リスクは
+  低い）経由で登録した。関数名・実装（Postgres固有の語彙）自体は
+  `cmd/execdb`側に置き、`engine`はPostgresの存在を知らないという既存の
+  境界を保っている。
+
+**確認**: `make check`・`make race`・`make test`（5ドライバすべて`ok`、
+`isql`でも別途確認）とも green。既存4ドライバ・REPL・その他e2eテストへの
+回帰なし。

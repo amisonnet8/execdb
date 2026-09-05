@@ -14,8 +14,9 @@ DBエンジンとデータ領域を1つの実行ファイル内に保持する�
 
 外部クライアント（ORM、DBツール、各言語のドライバ）は、PostgreSQL互換
 ワイヤープロトコルのサブセット経由で接続できるため、既存のPostgres用
-ドライバ資産（JDBC、psycopg、node-postgres、Npgsql、pgx等）が、各ドライバ
-自身のデフォルト接続設定のままそのまま利用できます。
+ドライバ資産（JDBC、psycopg、node-postgres、Npgsql、pgx等）が、ほぼ
+ExecDB側の追加設定なしに利用できます（唯一の既知の例外はNpgsqlで、
+詳細は[`docs/spec/execdb_spec.md`](docs/spec/execdb_spec.md)§8を参照）。
 
 ## インストール
 

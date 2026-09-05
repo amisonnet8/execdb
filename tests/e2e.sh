@@ -299,14 +299,15 @@ pass "pgwire TCP: tests/pgclient (pgx, Simple Query mode) SELECT/NULL/DDL-reject
 stop_server "$pid2"
 
 # --- other-language driver checks (tests/drivers, phase 4 Step 7): each
-# driver connects with its OWN default settings (no ExecDB-specific
-# workaround flags), proving Extended Query (Step 5) interop beyond pgx.
+# driver connects with its own default settings wherever possible (Npgsql
+# is the one exception -- see tests/drivers/README.md), proving Extended
+# Query (Step 5) interop beyond pgx.
 # tests/drivers/run-all.sh owns the server setup and per-driver skip logic
 # (a runtime that isn't installed skips rather than fails, matching the
 # PTY-only Ctrl+C check's established pattern above) -- it's shared
 # verbatim with CI's `drivers` job, so both paths exercise identically. ---
 bash "$ROOT/tests/drivers/run-all.sh" "$BIN" 15538 || fail "tests/drivers checks failed"
-pass "pgwire TCP: tests/drivers (python/node/java) default-mode checks"
+pass "pgwire TCP: tests/drivers (python/node/java/dotnet/odbc) default-mode checks"
 
 # --- pgwire authentication: -u/--user cleartext password (spec §8, phase 4
 #     Step 4). Correct credentials connect; a wrong password or a

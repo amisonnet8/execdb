@@ -70,6 +70,181 @@ Step 5では「パラメータは常にテキスト」という前提で、`Bind
 返す設計をやめたわけではない——「サーバーが何を答えたか」と「クライアントが
 何を自己申告したか」は別物、という整理が今回の核心）。
 
+## Npgsqlは接続文字列に`Server Compatibility Mode=NoTypeLoading`が必要（フェーズ④Step 7、当初は見送っていたドライバ）
+
+フェーズ④の当初計画では.NET（Npgsql）の実機検証を見送っていた（「常に
+Extended Queryを使うため接続不可」という理由）。Step 5でExtended Queryを
+実装した後、実際にNpgsqlのデフォルト設定で接続してみると、Extended Query
+自体は問題なく通ったが、別の全く独立した理由で接続確立そのものが失敗した。
+
+**原因: Npgsqlは接続確立時に独自の「型カタログのブートストラップ」を行う。**
+`SELECT version();`に続けて、`pg_type`/`pg_namespace`/`pg_class`/`pg_proc`/
+`pg_range`/`pg_attribute`/`pg_enum`という実在のPostgresシステムカタログを
+対象にした複数のSELECTを1つのSimple Queryメッセージとしてバッチ送信して
+くる（カスタム型・enum・複合型・配列型をクライアント側で解決するための
+仕組み）。SQLiteにはこれらの関数・テーブルが一切無いため
+`SQL logic error: no such function: version`のようなエラーになり、
+アプリケーションのクエリを1つも送らないうちに接続が落ちる。pgx/psycopg/
+node-postgres/pgJDBCはいずれもこの種のブートストラップを行わないため
+（実機確認済み）、Npgsql固有の問題である。
+
+**対処: 接続文字列に`Server Compatibility Mode=NoTypeLoading`を指定する。**
+これはExecDB向けの独自パッチではなく、CockroachDB・Redshift等「ワイヤー
+互換だが本物のPostgresではない」バックエンドに接続する際にNpgsql自身が
+公式に案内している標準の接続オプションで、指定すると型カタログの
+ブートストラップ自体をスキップし、組み込みの既知型（int4/text/bool等）
+だけで動作するようになる。`tests/drivers/run-all.sh`が呼び出し時にこの
+パラメータを付与しており、`tests/drivers/dotnet/Program.cs`自体は
+ハードコードしていない（呼び出し元の責務として分離）。**この1点だけは
+他の4ドライバ（pgx/pgJDBC/psycopg/node-postgres）と異なり「デフォルト
+接続設定のまま」では接続できない**——execdb_spec.md§8・
+`tests/drivers/README.md`にその旨を明記している。
+
+**副次的に見つかった別の問題（Describeのパラメータ仮バインド）:** 上記を
+解決して接続はできても、`SELECT $1`のような「プレースホルダそのものが
+結果列になる」問い合わせで、Npgsqlの`ExecuteScalarAsync()`が
+`InvalidCastException`を投げるケースが見つかった。原因は
+`describeRowShape`（`cmd/execdb/pgextended.go`）が、statement-level・
+portal-levelのどちらのDescribeでも常に全プレースホルダをNULLで仮バインド
+して試験実行していたため——portal-level Describe（Bind後）の時点では
+実際のBind値（`portal.args`）が既にあるにもかかわらずそれを使っておらず、
+`SELECT $1`のNULL仮バインド結果は`columnOID`のScanTypeフォールバックで
+OID 25(text)になる。pgJDBC（`getLong()`）やnode-postgres（暗黙の文字列
+比較）は値取得側が文字列を許容するため表面化しなかったが、Npgsqlの
+`ExecuteScalarAsync()`は宣言されたOIDどおりの厳密な型でしか値を返さない
+ため、text列を`(long)`にキャストしようとして失敗した。**対処:
+portal-level Describeでは`portal.args`（実際のBind値）を仮バインドに使う
+よう変更**——real PostgreSQL自身も、クライアントが`Parse`で申告した
+パラメータ型からこの種の列の型を決定するため、この修正はreal PostgreSQLの
+挙動により近づける形になった。
+
+**もう一つ見つかった、テストインフラ側の潜在バグ（`tests/drivers/run-all.sh`）:**
+上記2つの原因究明中、Npgsqlが投げる例外のスタックトレース（stderr出力）が
+一切見えず、原因調査が難航する場面があった。原因は`run-all.sh`の
+`exec 3>&- 3<&- 2>/dev/null || true`という行——サーバー起動確認用に開いた
+fd 3を閉じる際の警告を消すつもりだったが、**波括弧で囲まずに裸の`exec`へ
+リダイレクトを付けると、そのリダイレクトは現在のシェルに対して恒久的に
+適用される**（サブシェルではなく現在のシェル自身の設定を変更する`exec`の
+性質上）。結果として、この行以降のスクリプト全体のstderrが`/dev/null`へ
+永久にリダイレクトされてしまい、各ドライバチェックの`FAIL - ...`という
+エラーメッセージも、ドライバ自身がstderrに吐くクラッシュ内容も、以後
+一切表示されなくなっていた（python/node/javaは元々失敗したことがなかった
+ため、この潜在バグはNpgsql検証で初めて表面化した）。**対処:
+`{ exec 3>&- 3<&-; } 2>/dev/null || true`とブレースでグループ化し、
+リダイレクトの適用範囲をfdクローズ自体に限定した。**
+
+## ODBC（psqlODBC）対応: pg_catalog互換ビューの導入（フェーズ④完了後の追加）
+
+Npgsql対応の後、ODBC（`unixodbc`+PostgreSQL公式のODBCドライバ`psqlODBC`）も
+検証してほしいという要望を受け、実機で調査した。
+
+**初手の結果: 接続すらできない。** `isql`で素朴に繋ぐと
+`SQL logic error: no such table: pg_type`で即座に失敗した。デバッグ出力
+（`handleSimpleQuery`/`handleParse`に一時的な`fmt.Fprintln(os.Stderr, ...)`
+を仕込み、実際に送られてくるSQL文をそのまま観測する——pgJDBC/Npgsql調査と
+同じ手法）で調べたところ、psqlODBCは接続直後に
+`select oid, typbasetype from pg_type where typname = 'lo'`
+（ラージオブジェクト型の有無チェック）を送っていた。
+
+**2段階に切り分けて調査した。**
+
+1. **Tier 1（軽量）**: 上記の`pg_type`単発クエリだけなら、空の`pg_type`
+   テーブルを1つ用意するだけで、接続・SELECT・パラメータ化クエリ・
+   INSERT・DDL拒否（42501）まですべて動くことを確認した。
+2. **Tier 2（重い）**: ただし`cursor.tables()`/`cursor.columns()`
+   （`SQLTables`/`SQLColumns`——Excel・Power BI・Access等が「テーブル
+   一覧を見せる」ために内部で呼ぶODBC標準API）は、実際には
+   `pg_class`/`pg_namespace`/`pg_attribute`/`pg_attrdef`という実在の
+   Postgresシステムカタログへの本格的なJOINクエリを送ってきており、
+   さらに`pg_get_expr()`/`current_schema()`というPostgres組み込み関数の
+   呼び出しも含んでいた。
+
+**ユーザーとの相談の結果、Tier 1・Tier 2の両方を実装する方針で確定した。**
+以下、実装中に判明した設計上の制約と回避策。
+
+### 設計: 実テーブルを汚さない「pg_catalog互換ビュー」（`cmd/execdb/pgcatalog.go`）
+
+`pg_class`/`pg_namespace`/`pg_attribute`は、ExecDBの実スキーマ
+（`sqlite_master`・`pragma_table_info()`）から動的に導出するSQLビューとして
+定義し、**静的なデータとして書き出さない**設計にした。これにより
+スキーマ変更後も常に最新の状態を反映し、メンテナンスコストがゼロになる。
+`pragma_table_info(m.name)`をテーブル値関数として`sqlite_master`と相関
+JOINできる（`SELECT m.name, p.* FROM sqlite_master m, pragma_table_info(m.name) p`）
+ことは実測確認済み。
+
+**当初案（ATTACH DATABASEで独立スキーマにする）は却下した。**
+`ATTACH DATABASE ':memory:' AS pg_catalog`した上でその中に
+`CREATE VIEW pg_catalog.pg_class AS ... FROM main.sqlite_master ...`を
+定義しようとしたところ、**`view pg_class cannot reference objects in
+database main`**というエラーで拒否された。SQLiteは「別データベースの
+オブジェクトを参照するVIEWを、そのデータベース以外の場所に定義できない」
+という制約を持つ（実測で確認、ドキュメントだけでは気づきにくい）。
+
+**対処: 通常のATTACHではなく、`main`を自由に参照できる`TEMP`ビュー/
+テーブルとして定義する。** TEMPスキーマは`main`を無制限に参照でき
+（実測確認済み）、かつ`.tables`/`.dump`/スナップショットのいずれにも
+現れない（ExecDB自身のスキーマ列挙は`main`のみを見るため）——実データを
+一切汚染しない。ただしTEMPオブジェクトは`pg_catalog.pg_class`のような
+**スキーマ修飾付き**の名前では参照できない（`pg_catalog`という名の
+データベースが実在しないため）。psqlODBCの`SQLTables`/`SQLColumns`クエリは
+まさにこの修飾付き形式で送られてくるため、**クライアントから届いたSQL文の
+`pg_catalog.`という文字列をサーバー側で単純に除去してから実行する**
+（`rewritePGCatalogQuery`、`handleSimpleQuery`/`handleParse`双方に適用）
+ことで、修飾あり/なしどちらの参照も同じTEMPオブジェクトへ解決させている。
+SET/SHOW同様の「第3の区分」に近いが、こちらは文の一部を書き換えるだけで
+実行自体はSQLiteへそのまま委ねる点が異なる。
+
+**副次的に見つかったSQLite側の構文制約（`pg_type`）:**
+`SELECT * FROM (VALUES (...), (...)) AS v(col1, col2, ...)`という、
+派生テーブルに列名リストを付けるASエイリアス構文はSQLiteでは未対応
+（`near "(": syntax error`）——標準SQL/Postgresでは通る書き方だが、
+SQLiteの文法には無い。**対処: `pg_type`だけは`CREATE TEMP TABLE`+
+`INSERT`の実テーブルにした**（VIEWではなくTABLE。他がVIEWなのは
+`main`のライブスキーマを反映する必要があるからで、`pg_type`は固定の
+型一覧なので実テーブルで問題ない）。
+
+**接続プール再利用によるべき等性の問題（Npgsqlの`decodeBinaryParam`修正時と
+同種の落とし穴）:** `engine.DB.Session`は`database/sql`の標準コネクション
+プールから物理コネクションを配る（`engine/engine.go`）。TEMPオブジェクトは
+論理的な`Session`ではなく物理コネクションの寿命に紐づくため、あるpgwire
+接続が終了してプールへ返却された物理コネクションを、**別の新しいpgwire
+接続が再利用**すると、その物理コネクション上には前回作成済みのTEMPビューが
+既に存在し、`CREATE TEMP VIEW`が「already exists」で失敗する。
+**対処: `sqlite_temp_master`を見て、`pg_type`が既に存在すればセットアップ
+自体をスキップする**（`pgCatalogAlreadyAttached`）べき等な設計にした。
+2本以上のpsqlODBC接続を同一サーバーに対して行って初めて発覚した
+（1本目の接続だけをテストしている限り気づけない、というのがこの種の
+バグの共通した性質）。
+
+**Postgres組み込み関数の追加登録（`engine.RegisterScalarFunction`、新規）:**
+`current_schema()`・`pg_get_expr(pg_node_tree, oid)`はSQLite本体には
+存在しない関数のため、`modernc.org/sqlite.RegisterDeterministicScalarFunction`
+経由でプロセス全体に対し1回だけ登録する必要があった。この登録APIは
+`modernc.org/sqlite/lib`（`Complete`が使う生成コード）ではなく、
+安定版の`modernc.org/sqlite`トップレベルパッケージが公開している
+ドキュメント化されたAPIのため、`.claude/rules/sqlite-quirks.md`の
+「`lib`は生成コードでバージョン間の破壊的変更リスクがある」という注意書きは
+こちらには当てはまらない。`engine.RegisterScalarFunction`という薄い
+ラッパーを新設し（`engine/function.go`）、関数名・実装（Postgres固有の
+語彙）自体は`cmd/execdb/pgcatalog.go`側に置くことで、`engine`パッケージ
+自体はPostgresの存在を知らないという既存の境界を保っている。
+`current_schema()`は常に`'public'`を返し、`pg_get_expr()`は常に`NULL`を
+返す（`pg_attrdef`ビューが常に0行なので、実際にはNULL引数でしか呼ばれない
+——デフォルト値の式デコードという本来の機能は実装していない）。
+
+**発見の副産物（`pg_attribute`に列が足りなかった）:** `SQLColumns`の実クエリを
+そのままREPLで再現して初めて、`a.atthasdef`という列を`pg_attribute`に
+用意し忘れていたことが判明した（`no such column: a.atthasdef`）。実際の
+クエリ文をそのまま流して確認する、という一貫した手法がここでも効いた。
+
+**スコープの位置づけ:** 制約・インデックス・トリガー・複数スキーマ
+（ExecDBは`public`相当のスキーマ1つのみ）は対象外。あくまで
+「基本的な接続・型付きクエリ・ドライバ自身のスキーマブラウザ
+（SQLTables/SQLColumns）が実スキーマに対して動く」ことがゴールであり、
+本格的なPostgresシステムカタログの再現ではない
+（`.claude/rules/pgwire.md`全体の「サブセット、フルセットではない」
+という方針のまま）。
+
 ## 型マッピング（確定、フェーズ④Step 1〜2）
 
 SQLiteは動的型付け（型アフィニティ）のため、列の値の型が固定されない。

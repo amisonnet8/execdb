@@ -110,6 +110,11 @@ func handleConnection(conn net.Conn, db *engine.DB, user, password string) {
 	}
 	defer sess.Close()
 
+	if err := setupPGCatalog(context.Background(), sess); err != nil {
+		writeErrorResponse(conn, sqlstateGeneric, err.Error())
+		return
+	}
+
 	params := newSessionParams(startupParameterStatus())
 	eq := newExtendedQueryConn()
 	defer eq.closeAll()
@@ -350,6 +355,7 @@ func handleSimpleQuery(ctx context.Context, conn net.Conn, sess *engine.Session,
 	if strings.TrimSpace(query) == "" {
 		return txState, nil
 	}
+	query = rewritePGCatalogQuery(query)
 	if err := checkExternalAccess(query); err != nil {
 		if werr := writeErrorResponse(conn, sqlstateInsufficientPrivilege, err.Error()); werr != nil {
 			return txState, werr

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/drivers/run-all.sh -- runs every available driver check
-# (tests/drivers/README.md: python/node/java) against a throwaway ExecDB
+# (tests/drivers/README.md: python/node/java/dotnet/odbc) against a throwaway ExecDB
 # server seeded with table t(a INTEGER), skipping any driver whose runtime
 # isn't installed. Shared by tests/e2e.sh (make test) and CI's `drivers`
 # job (.github/workflows/test.yml) so both paths exercise identically,
@@ -41,7 +41,16 @@ while ! (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; do
   [ "$tries" -gt 0 ] || { echo "run-all.sh: timed out waiting for 127.0.0.1:$PORT to accept connections" >&2; exit 1; }
   sleep 0.1
 done
-exec 3>&- 3<&- 2>/dev/null || true
+# Braced so 2>/dev/null (silencing a possible "Bad file descriptor" from
+# closing fd 3) scopes to just this fd-close attempt -- a bare
+# "exec 3>&- 3<&- 2>/dev/null" (no braces) would apply that redirect to
+# the *current shell* for the rest of the script, permanently swallowing
+# every later stderr message (every driver's own FAIL echo, and any
+# crash output a driver process itself writes to stderr) without any
+# error of its own (discovered in phase 4 Step 7 via the .NET/Npgsql
+# check: its "Unhandled exception" trace, needed to diagnose the missing
+# ServerCompatibilityMode workaround below, was silently disappearing).
+{ exec 3>&- 3<&-; } 2>/dev/null || true
 
 status=0
 
@@ -76,6 +85,41 @@ if command -v java >/dev/null 2>&1 && command -v javac >/dev/null 2>&1; then
   fi
 else
   echo "skip - tests/drivers/java (java/javac not available)"
+fi
+
+# Server Compatibility Mode=NoTypeLoading: unlike the other three drivers
+# above, Npgsql's default connection flow is not just "connect and query"
+# -- it first bootstraps a type catalog via a batch of SELECTs against
+# pg_type/pg_namespace/pg_class/pg_proc/pg_range/pg_attribute/pg_enum plus
+# a bare "SELECT version()" (tests/drivers/README.md's Npgsql caveat).
+# SQLite has none of those, so the batch fails outright and the connection
+# itself never completes without this. It is a standard, Npgsql-native
+# connection-string option (not an ExecDB-specific patch) for exactly this
+# situation -- the same one CockroachDB/Redshift-style "wire-compatible
+# but not real Postgres" backends document for Npgsql users.
+if command -v dotnet >/dev/null 2>&1; then
+  if bash "$DRIVERS_DIR/dotnet/run.sh" "Host=127.0.0.1;Port=$PORT;Username=any;Database=any;Server Compatibility Mode=NoTypeLoading"; then
+    echo "ok - tests/drivers/dotnet (Npgsql)"
+  else
+    echo "FAIL - tests/drivers/dotnet (Npgsql)" >&2
+    status=1
+  fi
+else
+  echo "skip - tests/drivers/dotnet (dotnet not available)"
+fi
+
+# psqlODBC (via pyodbc) needs both a driver manager (unixODBC's "isql" is
+# its own presence check here) and the PostgreSQL ODBC driver itself
+# registered with it (odbcinst -q -d lists installed drivers by name).
+if command -v isql >/dev/null 2>&1 && odbcinst -q -d 2>/dev/null | grep -qi postgresql && python3 -c 'import pyodbc' >/dev/null 2>&1; then
+  if python3 "$DRIVERS_DIR/odbc/check.py" "Driver=PostgreSQL Unicode;Server=127.0.0.1;Port=$PORT;Database=any;Uid=any;Pwd=;"; then
+    echo "ok - tests/drivers/odbc (psqlODBC)"
+  else
+    echo "FAIL - tests/drivers/odbc (psqlODBC)" >&2
+    status=1
+  fi
+else
+  echo "skip - tests/drivers/odbc (unixODBC/psqlODBC/pyodbc not available)"
 fi
 
 exit "$status"
