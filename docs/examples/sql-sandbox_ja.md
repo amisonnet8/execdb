@@ -7,8 +7,12 @@ SQLを学ぶ、クエリのアイデアを試す、あるいは授業/勉強会�
 することなく、フル機能のSQLエンジン(view、index、trigger、transaction
 ——おもちゃのサブセットではなく本物のSQLite)を提供する。
 
+[最新リリース](https://github.com/amisonnet8/execdb/releases/latest)から
+自分のプラットフォーム用のバイナリを取得する(Go不要)、または
+Go 1.26以降があれば`go install github.com/amisonnet8/execdb/cmd/execdb@latest`
+でもよい:
+
 ```sh
-go install github.com/amisonnet8/execdb/cmd/execdb@latest
 execdb
 ```
 

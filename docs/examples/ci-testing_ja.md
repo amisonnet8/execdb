@@ -8,9 +8,12 @@
 
 ## 1. シード済みのスナップショットを一度だけビルドする
 
-```sh
-go install github.com/amisonnet8/execdb/cmd/execdb@latest
+[最新リリース](https://github.com/amisonnet8/execdb/releases/latest)から
+自分のプラットフォーム用のバイナリを取得する(Go不要)、または
+Go 1.26以降があれば`go install github.com/amisonnet8/execdb/cmd/execdb@latest`
+でもよい。取得したら:
 
+```sh
 execdb <<'SQL'
 CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE);
 CREATE TABLE posts(id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), title TEXT);

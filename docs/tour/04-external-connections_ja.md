@@ -99,7 +99,8 @@ Saved snapshot to mydb
 ```
 
 **次に読むもの:** 全CLIフラグ・REPLコマンドのリファレンスは
-[`docs/usage/`](../usage/)、完結したタスク指向のウォークスルー(CIテスト
-用DB、バグ再現の共有、SQLサンドボックス)は[`docs/examples/`](../examples/)、
-このツアーで扱った内容すべての設計上の理由は
+[`docs/usage/`](../usage/README_ja.md)、完結したタスク指向のウォークスルー
+(CIテスト用DB、バグ再現の共有、SQLサンドボックス)は
+[`docs/examples/`](../examples/README_ja.md)、このツアーで扱った内容
+すべての設計上の理由は
 [`docs/spec/execdb_spec_ja.md`](../spec/execdb_spec_ja.md)を参照。

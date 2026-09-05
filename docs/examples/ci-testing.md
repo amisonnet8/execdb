@@ -8,9 +8,12 @@ migration step, no waiting for a service to become healthy.
 
 ## 1. Build a seeded snapshot once
 
-```sh
-go install github.com/amisonnet8/execdb/cmd/execdb@latest
+Grab the binary for your platform from the
+[latest release](https://github.com/amisonnet8/execdb/releases/latest) (no
+Go required), or `go install github.com/amisonnet8/execdb/cmd/execdb@latest`
+if you have Go 1.26+. Then:
 
+```sh
 execdb <<'SQL'
 CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE);
 CREATE TABLE posts(id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), title TEXT);

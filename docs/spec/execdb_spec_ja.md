@@ -743,7 +743,7 @@ Postgresプロトコルは接続（コネクション）自体がステートフ
 
 **REPLモード、外部I/Fあり:**
 ```
-ExecDB v0.1.0
+ExecDB v0.1.1
 Loaded snapshot: mydb_20260901120000
 Listening on :5432 (PostgreSQL wire protocol)
 Listening on /tmp/execdb.sock (UNIX Domain Socket)
@@ -752,14 +752,14 @@ Enter ".help" for usage hints.
 
 **REPLモード、データなし・外部I/Fなし:**
 ```
-ExecDB v0.1.0
+ExecDB v0.1.1
 No embedded data. Starting with an empty in-memory database.
 Enter ".help" for usage hints.
 ```
 
 **サーバーモード（`--no-repl`）:**
 ```
-ExecDB v0.1.0
+ExecDB v0.1.1
 Loaded snapshot: mydb_20260901120000
 Listening on :5432 (PostgreSQL wire protocol)
 Running in server mode (--no-repl). Send SIGTERM to save and exit.

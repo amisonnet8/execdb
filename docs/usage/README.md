@@ -19,11 +19,12 @@ repro, a mock API server, connecting from another language), see
 
 ## The short version
 
-```sh
-# Install (requires Go 1.26+)
-go install github.com/amisonnet8/execdb/cmd/execdb@latest
+Grab the binary for your platform from the
+[latest release](https://github.com/amisonnet8/execdb/releases/latest) (no
+Go required), or `go install github.com/amisonnet8/execdb/cmd/execdb@latest`
+if you have Go 1.26+. Then run it:
 
-# Run the REPL
+```sh
 execdb
 ```
 

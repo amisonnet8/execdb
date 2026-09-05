@@ -7,8 +7,9 @@ ExecDBを初めて使う人向けの、体験型のウォークスルー。各�
 実際に打ちながら読んでいくとよい。
 
 すでに探しているものが分かっているなら、ここではない: プレーンな
-リファレンスは[`docs/usage/`](../usage/)、自己完結したタスク指向の
-ウォークスルーは[`docs/examples/`](../examples/)を代わりに参照。
+リファレンスは[`docs/usage/`](../usage/README_ja.md)、自己完結した
+タスク指向のウォークスルーは[`docs/examples/`](../examples/README_ja.md)を
+代わりに参照。
 
 1. **[第1歩: REPL](01-first-steps_ja.md)** — ExecDBを起動し、SQLを実行し、
    スキーマを見て回る。

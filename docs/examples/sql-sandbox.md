@@ -7,8 +7,12 @@ exercise, ExecDB gives you a full SQL engine (views, indexes, triggers,
 transactions — real SQLite, not a toy subset) with nothing to install
 beyond the single binary.
 
+Grab the binary for your platform from the
+[latest release](https://github.com/amisonnet8/execdb/releases/latest) (no
+Go required), or `go install github.com/amisonnet8/execdb/cmd/execdb@latest`
+if you have Go 1.26+:
+
 ```sh
-go install github.com/amisonnet8/execdb/cmd/execdb@latest
 execdb
 ```
 

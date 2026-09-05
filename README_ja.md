@@ -22,8 +22,8 @@ ExecDB側の追加設定なしに利用できます（唯一の既知の例外�
 
 **ビルド済みバイナリ**（Go不要）: [最新リリース](https://github.com/amisonnet8/execdb/releases/latest)
 から自分のプラットフォーム用のファイルを取得してください——例:
-`execdb_v0.1.0_linux_amd64`、`execdb_v0.1.0_darwin_arm64`、
-`execdb_v0.1.0_windows_amd64.exe`。アーカイブではなく生の実行ファイル
+`execdb_v0.1.1_linux_amd64`、`execdb_v0.1.1_darwin_arm64`、
+`execdb_v0.1.1_windows_amd64.exe`。アーカイブではなく生の実行ファイル
 そのものなので、ダウンロードして`chmod +x`（Windowsでは不要）するだけで
 実行できます。
 
@@ -72,11 +72,12 @@ execdb> SELECT * FROM t;
 
 ## 詳しくは
 
-- **[`docs/tour/`](docs/tour/)** — 初めて使う方向けの、体験型・順を追った
-  入門ガイド（英語）
-- **[`docs/usage/`](docs/usage/)** — CLIオプション・REPLコマンドのリファレンス
-- **[`docs/examples/`](docs/examples/)** — CIテスト用DB、バグ再現データの共有、
-  モックAPIサーバー、SQLサンドボックス
+- **[`docs/tour/`](docs/tour/README_ja.md)** — 初めて使う方向けの、体験型・
+  順を追った入門ガイド
+- **[`docs/usage/`](docs/usage/README_ja.md)** — CLIオプション・REPLコマンドの
+  リファレンス
+- **[`docs/examples/`](docs/examples/README_ja.md)** — CIテスト用DB、バグ再現
+  データの共有、モックAPIサーバー、SQLサンドボックス
 - **[`docs/spec/execdb_spec_ja.md`](docs/spec/execdb_spec_ja.md)** — 詳細な設計・仕様書
 - **[`PLAN.md`](PLAN.md)** — 実装の進捗
 

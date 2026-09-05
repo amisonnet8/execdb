@@ -21,8 +21,8 @@ to no ExecDB-specific setup — see [`docs/spec/execdb_spec.md`](docs/spec/execd
 
 **Prebuilt binary** (no Go required): grab the file for your platform from
 the [latest release](https://github.com/amisonnet8/execdb/releases/latest)
-— e.g. `execdb_v0.1.0_linux_amd64`, `execdb_v0.1.0_darwin_arm64`,
-`execdb_v0.1.0_windows_amd64.exe`. It's a single raw executable, not an
+— e.g. `execdb_v0.1.1_linux_amd64`, `execdb_v0.1.1_darwin_arm64`,
+`execdb_v0.1.1_windows_amd64.exe`. It's a single raw executable, not an
 archive: download it, `chmod +x` it (not needed on Windows), and run it.
 
 **From source** (requires Go 1.26+):

@@ -729,7 +729,7 @@ At startup, a banner is shown indicating that the REPL/external I/F are now avai
 
 **REPL mode, external I/F enabled:**
 ```
-ExecDB v0.1.0
+ExecDB v0.1.1
 Loaded snapshot: mydb_20260901120000
 Listening on :5432 (PostgreSQL wire protocol)
 Listening on /tmp/execdb.sock (UNIX Domain Socket)
@@ -738,14 +738,14 @@ Enter ".help" for usage hints.
 
 **REPL mode, no data, no external I/F:**
 ```
-ExecDB v0.1.0
+ExecDB v0.1.1
 No embedded data. Starting with an empty in-memory database.
 Enter ".help" for usage hints.
 ```
 
 **Server mode (`--no-repl`):**
 ```
-ExecDB v0.1.0
+ExecDB v0.1.1
 Loaded snapshot: mydb_20260901120000
 Listening on :5432 (PostgreSQL wire protocol)
 Running in server mode (--no-repl). Send SIGTERM to save and exit.
