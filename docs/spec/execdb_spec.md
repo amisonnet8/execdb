@@ -762,11 +762,3 @@ Loaded snapshot: mydb_20260901120000
 Listening on :5432 (PostgreSQL wire protocol)
 Running in server mode (--no-repl). Send SIGTERM to save and exit.
 ```
-
----
-
-## 11. GitHubリポジトリ情報
-
-* **License:** MIT
-* **Description:** Portable single-binary RDBMS in Go. SQLite-compatible SQL, zero setup, data snapshots as executable files.
-* **Topics:** `go` `golang` `sql` `database` `in-memory-database` `rdbms` `portable` `cli-tool` `developer-tools` `pgwire` `single-binary` `sqlite`
