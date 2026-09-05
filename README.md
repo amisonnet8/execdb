@@ -68,6 +68,8 @@ any Postgres client or driver can connect to it as-is.
 
 ## Learn more
 
+- **[Interactive guide (NotebookLM)](https://notebook.google.com/notebook/f4c3426c-b394-4412-bb38-5d4174e2c636)**
+  — an interactive Q&A notebook for exploring ExecDB
 - **[`docs/tour/`](docs/tour/)** — a hands-on, step-by-step walkthrough for
   first-time users
 - **[`docs/usage/`](docs/usage/)** — CLI flags and REPL command reference
