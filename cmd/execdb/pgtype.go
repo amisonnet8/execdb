@@ -23,6 +23,7 @@ const (
 	oidInt8      uint32 = 20
 	oidInt2      uint32 = 21
 	oidInt4      uint32 = 23
+	oidOid       uint32 = 26
 	oidText      uint32 = 25
 	oidFloat4    uint32 = 700
 	oidFloat8    uint32 = 701
@@ -284,6 +285,16 @@ func encodeBinaryBool(v bool) []byte {
 // be compared against or inserted into.
 func decodeBinaryParam(oid uint32, data []byte) (value any, ok bool) {
 	switch oid {
+	case oidText:
+		// text has no separate binary encoding in PostgreSQL -- its
+		// "binary" format for a Bind parameter is just the raw UTF-8
+		// bytes, identical to its text format. Only reachable when a
+		// client self-declares a parameter as text and then still binds
+		// it in binary format (Rust's tokio-postgres crate does this by
+		// default whenever any parameter is bound at all -- phase 4
+		// follow-up); every other verified driver either self-declares a
+		// non-text type or sends text parameters in text format.
+		return string(data), true
 	case oidInt2:
 		if len(data) != 2 {
 			return nil, false
@@ -294,6 +305,16 @@ func decodeBinaryParam(oid uint32, data []byte) (value any, ok bool) {
 			return nil, false
 		}
 		return int64(int32(binary.BigEndian.Uint32(data))), true
+	case oidOid:
+		// Real PostgreSQL's oid type is an unsigned 4-byte integer (unlike
+		// int4's signed one) -- only reachable via
+		// isPGTypeByOIDLookupQuery's override (pgcatalog.go, phase 4
+		// follow-up: tokio-postgres's own type-by-OID lookup query), not
+		// a real user-declared parameter type.
+		if len(data) != 4 {
+			return nil, false
+		}
+		return int64(binary.BigEndian.Uint32(data)), true
 	case oidInt8:
 		if len(data) != 8 {
 			return nil, false

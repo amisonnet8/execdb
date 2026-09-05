@@ -57,16 +57,16 @@ jobs:
 
   drivers:
     # tests/drivers (phase 4 Step 7 + follow-up): each of Python/psycopg2,
-    # Node.js/node-postgres, Java/pgJDBC, .NET/Npgsql, and psqlODBC (via
-    # pyodbc) connects to ExecDB's pgwire with its own default settings
-    # (no ExecDB-specific workaround flags -- Npgsql's connection string
-    # and ExecDB's own server-side pg_catalog compatibility views,
-    # cmd/execdb/pgcatalog.go, are the two documented exceptions; see
-    # tests/drivers/README.md). Runs on ubuntu-latest only -- unlike
-    # `check`'s 3-OS matrix, this job verifies the pgwire protocol
-    # implementation itself (OS-independent), not platform-specific
-    # behavior, so five extra runtimes across three OSes would not buy
-    # anything (.claude/rules/testing.md).
+    # Node.js/node-postgres, Java/pgJDBC, .NET/Npgsql, psqlODBC (via
+    # pyodbc), PHP/PDO_PGSQL, Ruby/pg, and Rust/postgres connects to
+    # ExecDB's pgwire with its own default settings (no ExecDB-specific
+    # workaround flags -- Npgsql's connection string and ExecDB's own
+    # server-side pg_catalog compatibility views, cmd/execdb/pgcatalog.go,
+    # are the two documented exceptions; see tests/drivers/README.md).
+    # Runs on ubuntu-latest only -- unlike `check`'s 3-OS matrix, this job
+    # verifies the pgwire protocol implementation itself (OS-independent),
+    # not platform-specific behavior, so eight extra runtimes across three
+    # OSes would not buy anything (.claude/rules/testing.md).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -101,6 +101,26 @@ jobs:
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "8.0.x"
+
+      - uses: shivammathur/setup-php@2.37.2
+        with:
+          php-version: "8.2"
+          extensions: pdo_pgsql
+
+      - uses: ruby/setup-ruby@v1.321.0
+        with:
+          ruby-version: "3.1"
+          bundler-cache: false
+
+      - name: Install libpq-dev (needed to build the pg gem's native extension)
+        run: sudo apt-get install -y libpq-dev
+
+      - name: Install pg gem
+        run: gem install pg --no-document
+
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
 
       - name: make build
         run: make build

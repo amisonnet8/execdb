@@ -271,6 +271,8 @@ func TestDecodeBinaryParam(t *testing.T) {
 		data []byte
 		want any
 	}{
+		{"text", oidText, []byte("hello"), "hello"},
+		{"oid", oidOid, []byte{0, 0, 0, 26}, int64(26)},
 		{"int2", oidInt2, []byte{0, 5}, int64(5)},
 		{"int2 negative", oidInt2, []byte{0xff, 0xff}, int64(-1)},
 		{"int4", oidInt4, []byte{0, 0, 1, 44}, int64(300)},
@@ -320,7 +322,6 @@ func TestDecodeBinaryParamRejectsUnspecifiedOrUnsupportedTypes(t *testing.T) {
 		data []byte
 	}{
 		{"unspecified OID 0", 0, []byte{0, 0, 0, 1}},
-		{"text has no binary decoder", oidText, []byte("hello")},
 		{"numeric has no binary decoder", oidNumeric, []byte{0, 0, 0, 0}},
 		{"int8 wrong length", oidInt8, []byte{0, 0, 0, 1}},
 		{"int4 wrong length", oidInt4, []byte{0, 1}},

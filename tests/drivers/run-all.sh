@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/drivers/run-all.sh -- runs every available driver check
-# (tests/drivers/README.md: python/node/java/dotnet/odbc) against a throwaway ExecDB
+# (tests/drivers/README.md: python/node/java/dotnet/odbc/php/ruby/rust) against a throwaway ExecDB
 # server seeded with table t(a INTEGER), skipping any driver whose runtime
 # isn't installed. Shared by tests/e2e.sh (make test) and CI's `drivers`
 # job (.github/workflows/test.yml) so both paths exercise identically,
@@ -120,6 +120,39 @@ if command -v isql >/dev/null 2>&1 && odbcinst -q -d 2>/dev/null | grep -qi post
   fi
 else
   echo "skip - tests/drivers/odbc (unixODBC/psqlODBC/pyodbc not available)"
+fi
+
+if command -v php >/dev/null 2>&1 && php -m | grep -qi '^pdo_pgsql$'; then
+  if php "$DRIVERS_DIR/php/check.php" "pgsql:host=127.0.0.1;port=$PORT;dbname=any;user=any"; then
+    echo "ok - tests/drivers/php (PDO_PGSQL)"
+  else
+    echo "FAIL - tests/drivers/php (PDO_PGSQL)" >&2
+    status=1
+  fi
+else
+  echo "skip - tests/drivers/php (php/pdo_pgsql not available)"
+fi
+
+if command -v ruby >/dev/null 2>&1 && ruby -e "require 'pg'" >/dev/null 2>&1; then
+  if ruby "$DRIVERS_DIR/ruby/check.rb" "host=127.0.0.1 port=$PORT dbname=any user=any"; then
+    echo "ok - tests/drivers/ruby (pg gem)"
+  else
+    echo "FAIL - tests/drivers/ruby (pg gem)" >&2
+    status=1
+  fi
+else
+  echo "skip - tests/drivers/ruby (ruby/pg gem not available)"
+fi
+
+if command -v cargo >/dev/null 2>&1; then
+  if bash "$DRIVERS_DIR/rust/run.sh" "host=127.0.0.1 port=$PORT dbname=any user=any"; then
+    echo "ok - tests/drivers/rust (postgres crate)"
+  else
+    echo "FAIL - tests/drivers/rust (postgres crate)" >&2
+    status=1
+  fi
+else
+  echo "skip - tests/drivers/rust (cargo not available)"
 fi
 
 exit "$status"

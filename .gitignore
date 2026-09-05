@@ -33,3 +33,4 @@ go.work.sum
 /tests/drivers/java/out/
 /tests/drivers/dotnet/bin/
 /tests/drivers/dotnet/obj/
+/tests/drivers/rust/target/

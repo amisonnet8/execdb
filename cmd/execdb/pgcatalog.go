@@ -58,6 +58,17 @@ func rewritePGCatalogQuery(query string) string {
 	return strings.ReplaceAll(query, "pg_catalog.", "")
 }
 
+// isPGTypeByOIDLookupQuery reports whether query is tokio-postgres's
+// (Rust postgres/tokio-postgres crate, phase 4 follow-up) fixed
+// "resolve a type by its OID" query, sent to look up the real type
+// behind whatever OID it was told about for a parameter or result
+// column it doesn't already recognize as a well-known built-in.
+// "rngsubtype" is a unique-enough fragment (from the pg_range join) that
+// no ordinary user query is likely to contain it by coincidence.
+func isPGTypeByOIDLookupQuery(query string) bool {
+	return strings.Contains(query, "rngsubtype")
+}
+
 // pgCatalogAlreadyAttached reports whether sess's underlying physical
 // connection already has setupPGCatalog's temp views defined.
 // engine.DB.Session hands out connections from database/sql's own pool
@@ -136,18 +147,27 @@ WHERE m.type IN ('table', 'view') AND m.name NOT LIKE 'sqlite_%';
 -- (confirmed empirically -- "near '(': syntax error"), so a view over a
 -- VALUES clause would only expose SQLite's auto-generated "column1",
 -- "column2", ... names, not oid/typname/etc.
-CREATE TEMP TABLE pg_type (oid INTEGER, typname TEXT, typbasetype INTEGER, typtype TEXT, typtypmod INTEGER);
+CREATE TEMP TABLE pg_type (oid INTEGER, typname TEXT, typbasetype INTEGER, typtype TEXT, typtypmod INTEGER, typelem INTEGER, typrelid INTEGER, typnamespace INTEGER);
 INSERT INTO pg_type VALUES
-	(16, 'bool', 0, 'b', -1),
-	(17, 'bytea', 0, 'b', -1),
-	(20, 'int8', 0, 'b', -1),
-	(21, 'int2', 0, 'b', -1),
-	(23, 'int4', 0, 'b', -1),
-	(25, 'text', 0, 'b', -1),
-	(700, 'float4', 0, 'b', -1),
-	(701, 'float8', 0, 'b', -1),
-	(1114, 'timestamp', 0, 'b', -1),
-	(1700, 'numeric', 0, 'b', -1);
+	(16, 'bool', 0, 'b', -1, 0, 0, 2200),
+	(17, 'bytea', 0, 'b', -1, 0, 0, 2200),
+	(20, 'int8', 0, 'b', -1, 0, 0, 2200),
+	(21, 'int2', 0, 'b', -1, 0, 0, 2200),
+	(23, 'int4', 0, 'b', -1, 0, 0, 2200),
+	(25, 'text', 0, 'b', -1, 0, 0, 2200),
+	(700, 'float4', 0, 'b', -1, 0, 0, 2200),
+	(701, 'float8', 0, 'b', -1, 0, 0, 2200),
+	(1114, 'timestamp', 0, 'b', -1, 0, 0, 2200),
+	(1700, 'numeric', 0, 'b', -1, 0, 0, 2200);
+
+-- Always empty: ExecDB has no genuine Postgres RANGE types. Exists only
+-- so tokio-postgres's (Rust postgres/tokio-postgres crate) per-OID type
+-- lookup query (a LEFT OUTER JOIN against this) type-checks -- discovered
+-- via phase 4 follow-up Rust testing, the same role pg_attrdef plays for
+-- psqlODBC's SQLColumns query.
+CREATE TEMP VIEW pg_range AS
+SELECT 0 AS rngtypid, 0 AS rngsubtype
+WHERE 0;
 
 CREATE TEMP VIEW pg_attribute AS
 SELECT

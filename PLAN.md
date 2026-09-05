@@ -1746,3 +1746,60 @@ SQLSTATE 42501・INSERT+COMMIT+SELECT往復に加え、`cursor.tables()`/
 **確認**: `make check`・`make race`・`make test`（5ドライバすべて`ok`、
 `isql`でも別途確認）とも green。既存4ドライバ・REPL・その他e2eテストへの
 回帰なし。
+
+## フェーズ④完了後の追加: PHP・Ruby・Rustドライバ検証、および`Describe`/`Execute`のOID不整合バグ修正（2026-09-05）
+
+ODBC対応の続きとして、Bash（コマンド）・PHP・Ruby・TypeScript・Rustへの
+対応可否を検討する要望を受けた。まず重複チェックを行い、**Bash（`psql`、
+既存のpsqlテストと重複）とTypeScript（Node.jsのnode-postgresと同一
+パッケージを使うため重複）を見送り**、PHP（PDO_PGSQL）・Ruby（`pg` gem）・
+Rustの3つを追加する方針を確定した——PHP/Rubyは内部的にpsycopg2と同じ
+`libpq`をラップしているが、PDOのデフォルト"エミュレートされたprepare"
+挙動やRubyの`exec_params`が既存ドライバと異なる経路を通るため価値が
+あると判断（詳細は`tests/drivers/README.md`）。
+
+`tests/drivers/{php,ruby,rust}/`を新設。`tests/drivers/run-all.sh`・
+`tests/e2e.sh`・`.github/workflows/test.yml`（`shivammathur/setup-php`・
+`ruby/setup-ruby`・`dtolnay/rust-toolchain`）・
+`.devcontainer/devcontainer.json`（php-cli/php-pgsql/ruby/ruby-dev/
+libpq-dev の apt導入＋`gem install --user-install pg`、Rustは
+`ghcr.io/devcontainers/features/rust:1`フィーチャー——**Debian標準の
+`rustc`/`cargo`（1.63/1.65）は古すぎて最近のクレートの
+`edition = "2024"`すら解釈できず、rustup経由での導入に切り替えた**）へ
+組み込んだ。
+
+**Rustの実機検証で発見した、他ドライバでは一度も表面化しなかった2つの
+バグ**（詳細は`.claude/rules/pgwire.md`「PHP・Ruby・Rust対応、および
+`Describe`/`Execute`のOID不整合バグ発見」節）:
+
+1. **`ParameterDescription`のOID 0への無限再帰**: tokio-postgresの
+   デフォルトAPIはパラメータ型を自己申告せず、ExecDBの「未指定」応答
+   （OID 0）を受け取ると`pg_catalog.pg_type`等へOID 0の正体を問い合わせ、
+   0行が返るため再度問い合わせ…を無限に繰り返しスタックオーバーフローに
+   至った。対処はテストコード側で`prepare_typed`を使い型を自己申告する
+   こと（pgJDBC/Npgsqlと同じ手法）。ExecDB側のデフォルトOIDを0から
+   text(25)へ変更する案も試したが、Rustの厳格な型チェックと衝突する
+   （`WrongType`エラー）ため不採用・revertした。
+2. **`Describe`と`Execute`で列のOIDが食い違う（ExecDB本体の潜在バグ、
+   全ドライバに影響しうる修正）**: `handleExecute`が、事前の`Describe`が
+   既にクライアントへ約束した`RowDescription`とは無関係に、実行時の
+   実際のクエリ結果から`columnOID()`を再計算していたため、
+   文レベル`Describe`（NULL仮バインドでtext(25)と判定）と`Execute`
+   （実際の値からint8(20)・バイナリで再計算）が食い違い、クライアントが
+   値を正しくデコードできなくなっていた。tokio-postgresが「文レベルの
+   `Describe`のみ、ポータルレベルは行わない」という（プロトコル上正当な）
+   順序を使うため初めて表面化した。**対処: `Describe`が確定させたOIDを
+   `preparedStatement.resultOIDs`/`portal.resultOIDs`にキャッシュし、
+   `Execute`はそれを再利用するよう修正**（バイナリ/テキストの判定のみ
+   `Execute`時点の`resultFormats`で都度計算）。この修正はドライバを
+   問わずpgwire実装全体の正しさに関わる。
+
+副次的に、`SELECT $1`のような文レベル`Describe`の仮バインドをNULLから
+「宣言されたパラメータ型に応じた代表値」に変更（`representativeParamValues`
+新設）、`decodeBinaryParam`に`text`型のバイナリデコードケースを追加した
+（Postgresのtextの"バイナリ"形式は生UTF-8バイト列そのものであり、
+tokio-postgresはデフォルトであらゆるパラメータをバイナリで送るため）。
+
+**確認**: `make check`・`make race`・`make test`（8ドライバすべて`ok`）とも
+green。既存5ドライバ・REPL・その他e2eテストへの回帰なし（OID不整合バグの
+修正は基盤部分の変更のため、フルスイートを再実行して確認済み）。

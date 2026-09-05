@@ -212,34 +212,44 @@ Go 1.26.7の`gofmt -s`は、**関数/型/変数などの宣言に直接紐づく
 ## 他言語ドライバ検証の運用方針（フェーズ④Step 7）
 
 Python（psycopg2）・Node.js（node-postgres）・Java（pgJDBC）・.NET（Npgsql、
-当初は見送っていたが後日追加）・ODBC（psqlODBC、フェーズ④完了後にさらに
-追加）の5ドライバは、`tests/drivers/`配下にチェックスクリプトを置き、
-`tests/drivers/run-all.sh`（`tests/e2e.sh`とCIの`drivers`ジョブが共有する）
-から実行する。Npgsqlのみ、接続文字列に`Server Compatibility
-Mode=NoTypeLoading`が必要（`.claude/rules/pgwire.md`参照）——クライアント
-側の設定だけで見ると唯一「デフォルト設定のまま」では接続できない例外
-である。psqlODBCはクライアント側の設定は不要だが、`SQLTables`/
-`SQLColumns`まで動かすためにExecDBサーバー側へpg_catalog互換ビューを
-追加している（同参照）。
+当初は見送っていたが後日追加）・ODBC（psqlODBC）・PHP（PDO_PGSQL）・Ruby
+（`pg` gem）・Rust（`postgres`/`tokio-postgres`クレート）の8ドライバは、
+`tests/drivers/`配下にチェックスクリプトを置き、`tests/drivers/run-all.sh`
+（`tests/e2e.sh`とCIの`drivers`ジョブが共有する）から実行する。Bash
+（`psql`、既存のpsqlテストと重複）とTypeScript（node-postgresと同一
+パッケージ）は対応済みのものと使うものが被るため見送った。Npgsqlのみ、
+接続文字列に`Server Compatibility Mode=NoTypeLoading`が必要
+（`.claude/rules/pgwire.md`参照）——クライアント側の設定だけで見ると唯一
+「デフォルト設定のまま」では接続できない例外である。psqlODBCはクライアント
+側の設定は不要だが、`SQLTables`/`SQLColumns`まで動かすためにExecDBサーバー
+側へpg_catalog互換ビューを追加している（同参照）。PHP/Ruby/Rustはいずれも
+クライアント側の追加設定なしに接続できる。
 
 - **ランタイムが無い環境ではスキップする（失敗扱いにしない）。**
   `run-all.sh`は各ランタイムを`command -v`で確認し、無ければ`skip -`行を
   出すだけで次のドライバへ進む——フェーズ③Step 6のPTY専用Ctrl+Cチェック
   （`script`コマンドが無い環境でスキップする）と同じ既存パターン。手元の
-  devcontainerには5つとも導入済み（Python/Node/Javaは
+  devcontainerには8つとも導入済み（Python/Node/Java/PHP/Ruby/ODBCは
   `.devcontainer/devcontainer.json`の`postCreateCommand`、.NETは
-  `ghcr.io/devcontainers/features/dotnet:2`フィーチャー経由、ODBCは
-  `unixodbc`/`unixodbc-dev`/`odbc-postgresql`/`python3-pyodbc`を
-  `postCreateCommand`へ追加）だが、devcontainer外でリポジトリを素の状態で
-  cloneした場合や、ランタイムの導入に失敗した環境では引き続きこの
-  スキップ挙動が効く——`make test`がそれだけでビルド自体を落とすことは
-  ない。ODBCのスキップ判定は`isql`（unixODBCの存在確認）＋
-  `odbcinst -q -d`が"postgresql"を含む行を返すか（ドライバ自体が
-  登録済みか）＋`python3 -c 'import pyodbc'`の3点セット。
+  `ghcr.io/devcontainers/features/dotnet:2`、Rustは
+  `ghcr.io/devcontainers/features/rust:1`フィーチャー経由——Debian標準の
+  `rustc`/`cargo`パッケージは古すぎて最近のクレートの`edition = "2024"`を
+  解釈できず不採用、フィーチャー経由でrustupベースの最新版を導入している）
+  だが、devcontainer外でリポジトリを素の状態でcloneした場合や、ランタイムの
+  導入に失敗した環境では引き続きこのスキップ挙動が効く——`make test`が
+  それだけでビルド自体を落とすことはない。ODBCのスキップ判定は`isql`
+  （unixODBCの存在確認）＋`odbcinst -q -d`が"postgresql"を含む行を返すか
+  （ドライバ自体が登録済みか）＋`python3 -c 'import pyodbc'`の3点セット。
+  Rubyは`gem install`がroot以外では`--user-install`が必要（PATHにgemの
+  binディレクトリが無い旨の警告が出るが、`require 'pg'`自体はuser-installの
+  gemを問題なく解決できるため無視してよい）。
 - **CIの`drivers`ジョブは`check`の3OSマトリクスには含めず、`ubuntu-latest`
   限定の別ジョブにする。** pgwireプロトコル実装自体はOS非依存（`-race`と
-  同じ理由付け）であり、5ランタイム×3OSを揃えるセットアップコストに
-  見合わないと判断した。
+  同じ理由付け）であり、8ランタイム×3OSを揃えるセットアップコストに
+  見合わないと判断した。CIでは`shivammathur/setup-php`・`ruby/setup-ruby`・
+  `dtolnay/rust-toolchain`をそれぞれ使用（Rubyの`pg` gemはCIランナーでは
+  root相当のため`--user-install`無しの`gem install pg`でよい——devcontainerの
+  非rootユーザーとはこの点で条件が異なる）。
 - **Node/Javaの依存（`node_modules/`、pgJDBCのjar）はリポジトリへ
   コミットしない。** `tests/drivers/node/run.sh`・`tests/drivers/java/run.sh`
   が初回実行時に`npm install`／Maven Centralからの取得を自動で行う

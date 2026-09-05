@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"time"
 
 	"github.com/amisonnet8/execdb/engine"
 )
@@ -35,6 +36,22 @@ type preparedStatement struct {
 	// decode a binary-format parameter at all, since Bind's own wire
 	// format carries no type information of its own.
 	paramOIDs []uint32
+
+	// resultOIDs caches the column OIDs the most recent statement-level
+	// Describe ('S') computed and already sent to the client via
+	// RowDescription. handleExecute must reuse these -- not recompute
+	// columnOID() fresh from the real, post-Bind query result -- because
+	// columnOID's ScanType fallback can legitimately give a different OID
+	// for a NULL-trial-run (Describe, before any real parameter value
+	// exists) than for the real bound value (Execute): a bug found via
+	// phase 4 follow-up Rust testing, where a client that only ever does
+	// a statement-level Describe (no portal-level one, a valid, allowed
+	// sequence real PostgreSQL supports) got RowDescription OID 25/text
+	// but the actual DataRow bytes were encoded as OID 20/int8 binary --
+	// two different, mutually-inconsistent answers about the very same
+	// column, silently corrupting the value for any client that trusts
+	// the OID it was already told. Set by describeRowShape.
+	resultOIDs []uint32
 }
 
 // portal is a Bind'd preparedStatement: a specific set of parameter values
@@ -48,6 +65,14 @@ type portal struct {
 	stmtName      string
 	args          []any
 	resultFormats []int16
+
+	// resultOIDs caches the column OIDs a portal-level Describe ('P')
+	// computed for this specific portal (using this portal's own real
+	// Bind values, unlike the statement-level trial run) -- nil if this
+	// portal was never Described, in which case handleExecute falls back
+	// to preparedStatement.resultOIDs. See that field's doc comment for
+	// why reusing a cached OID, rather than recomputing one, matters.
+	resultOIDs []uint32
 }
 
 // extendedQueryConn holds one pgwire connection's Extended Query state.
@@ -380,7 +405,6 @@ func handleDescribe(ctx context.Context, w io.Writer, sess *engine.Session, eq *
 	if !parsed {
 		return false, writeErrorResponse(w, sqlstateGeneric, "malformed Describe message")
 	}
-
 	switch kind {
 	case 'S':
 		ps, exists := eq.statements[name]
@@ -391,18 +415,57 @@ func handleDescribe(ctx context.Context, w io.Writer, sess *engine.Session, eq *
 		// (ps.paramOIDs); any parameter beyond what Parse declared -- or
 		// every one of them, for a client that left them all unspecified
 		// -- stays 0 (unspecified), matching writeParameterDescription's
-		// prior all-0 behavior for that case.
+		// prior all-0 behavior for that case. (A tempting alternative --
+		// defaulting to text (25) instead of 0 -- was tried and reverted:
+		// Rust's tokio-postgres crate then refuses to bind a non-string
+		// Rust value (e.g. i32) against a parameter the server declared
+		// as text, since unlike "unspecified" it enforces the declared
+		// type strictly client-side. 0 lets every other verified driver's
+		// own type stay in charge, which is what all 5 of them want.)
 		oids := make([]uint32, ps.numParams)
 		copy(oids, ps.paramOIDs)
+		// tokio-postgres's own type-by-OID lookup query (pgcatalog.go,
+		// phase 4 follow-up) leaves its "$1" OID unspecified, like most
+		// clients do for an ordinary query -- but unlike an ordinary
+		// query, ExecDB's usual "report 0/unspecified" answer here sends
+		// tokio-postgres into unbounded recursion: it re-issues this very
+		// query to resolve whatever type OID 0 supposedly means, gets 0
+		// again, and repeats until the client's stack overflows (confirmed
+		// empirically). Real PostgreSQL never hits this because its
+		// planner infers "$1" is compared against oid-typed pg_type.oid
+		// and reports that concretely. ExecDB has no such planner, so
+		// this one known query text is special-cased to answer with the
+		// real "oid" pseudo-type (26) instead of guessing generically.
+		if len(oids) == 1 && oids[0] == 0 && isPGTypeByOIDLookupQuery(ps.sql) {
+			oids[0] = oidOid
+			// Persisted onto ps itself, not just this response: handleBind
+			// separately consults ps.paramOIDs (not this local slice) to
+			// decide how to decode a binary-format parameter, so it needs
+			// to see the same override this ParameterDescription just
+			// promised the client.
+			ps.paramOIDs = oids
+		}
 		if werr := writeParameterDescription(w, oids); werr != nil {
 			return false, werr
 		}
 		// nil resultFormats: no Bind has happened yet for a
 		// statement-level Describe, so there is no requested format to
 		// honor -- real PostgreSQL always reports text here too. No Bind
-		// means no real parameter values either, so the trial run below
-		// binds every placeholder to NULL (args left nil).
-		return describeRowShape(ctx, w, sess, ps, nil, nil)
+		// means no real parameter value exists yet, but a self-declared
+		// parameter type (oids, above) does -- representativeParamValues
+		// turns each declared OID into a plausible non-NULL Go value
+		// (int64(0) for int4, "" for text, ...) instead of NULL, so a
+		// pass-through expression column like "SELECT $1" gets a real,
+		// correctly-typed value to sample instead of NULL's generic text
+		// fallback (phase 4 follow-up, discovered via Rust's
+		// tokio-postgres crate: unlike every other verified driver, its
+		// typed getters cannot decode a text-format value at all, so a
+		// "SELECT $1" declared int4 but reported as text failed outright).
+		// A parameter left genuinely unspecified (oid 0) still gets NULL,
+		// preserving the existing behavior other drivers already rely on.
+		rok, roids, rerr := describeRowShape(ctx, w, sess, ps, nil, representativeParamValues(oids))
+		ps.resultOIDs = roids
+		return rok, rerr
 	case 'P':
 		p, exists := eq.portals[name]
 		if !exists {
@@ -418,10 +481,41 @@ func handleDescribe(ctx context.Context, w io.Writer, sess *engine.Session, eq *
 		// pass-through expression columns like "SELECT $1", matching real
 		// PostgreSQL (which plans such a column's type from the
 		// client-declared parameter type, not "unknown"/text).
-		return describeRowShape(ctx, w, sess, ps, p.resultFormats, p.args)
+		pok, poids, perr := describeRowShape(ctx, w, sess, ps, p.resultFormats, p.args)
+		p.resultOIDs = poids
+		return pok, perr
 	default:
 		return false, writeErrorResponse(w, sqlstateGeneric, "malformed Describe message: unknown target")
 	}
+}
+
+// representativeParamValues turns each declared parameter OID into a
+// plausible non-NULL Go value of the matching type, for describeRowShape's
+// statement-level trial run to bind instead of NULL (see its call site's
+// doc comment for why). A parameter left genuinely unspecified (oid 0)
+// still becomes nil (NULL) -- there is no type to base a representative
+// value on, and NULL is what every already-verified driver expects there.
+func representativeParamValues(oids []uint32) []any {
+	args := make([]any, len(oids))
+	for i, oid := range oids {
+		switch oid {
+		case oidBool:
+			args[i] = false
+		case oidInt2, oidInt4, oidInt8, oidOid:
+			args[i] = int64(0)
+		case oidFloat4, oidFloat8, oidNumeric:
+			args[i] = float64(0)
+		case oidText:
+			args[i] = ""
+		case oidBytea:
+			args[i] = []byte{}
+		case oidTimestamp:
+			args[i] = time.Time{}
+		default:
+			args[i] = nil
+		}
+	}
+	return args
 }
 
 // describeRowShape answers a Describe's row-shape half (RowDescription or
@@ -445,13 +539,21 @@ func handleDescribe(ctx context.Context, w io.Writer, sess *engine.Session, eq *
 // from the request's own declared parameter type, unlike other verified
 // drivers, which tolerate ExecDB's NULL-trial-run text fallback because
 // their result getters coerce a string back to the requested type).
-func describeRowShape(ctx context.Context, w io.Writer, sess *engine.Session, ps *preparedStatement, resultFormats []int16, args []any) (ok bool, err error) {
+//
+// It returns the OIDs it decided on (nil for a non-row-returning
+// statement) so the caller can cache them on the preparedStatement/portal
+// -- handleExecute must reuse the exact OIDs already promised via
+// RowDescription rather than recomputing them from the real query result,
+// which can legitimately disagree with this trial run's answer (see
+// preparedStatement.resultOIDs's doc comment for the bug this caching
+// fixes).
+func describeRowShape(ctx context.Context, w io.Writer, sess *engine.Session, ps *preparedStatement, resultFormats []int16, args []any) (ok bool, oids []uint32, err error) {
 	if !ps.rowReturning {
-		return true, writeNoData(w)
+		return true, nil, writeNoData(w)
 	}
 
 	if _, serr := sess.ExecContext(ctx, "SAVEPOINT execdb_describe"); serr != nil {
-		return false, writeErrorResponse(w, sqlstateGeneric, serr.Error())
+		return false, nil, writeErrorResponse(w, sqlstateGeneric, serr.Error())
 	}
 	if args == nil {
 		args = make([]any, ps.numParams)
@@ -459,18 +561,23 @@ func describeRowShape(ctx context.Context, w io.Writer, sess *engine.Session, ps
 	rows, qerr := ps.stmt.QueryContext(ctx, args...)
 	rerr := rollbackDescribeSavepoint(ctx, sess)
 	if qerr != nil {
-		return false, writeErrorResponse(w, sqlstateGeneric, qerr.Error())
+		return false, nil, writeErrorResponse(w, sqlstateGeneric, qerr.Error())
 	}
 	if rerr != nil {
-		return false, writeErrorResponse(w, sqlstateGeneric, rerr.Error())
+		return false, nil, writeErrorResponse(w, sqlstateGeneric, rerr.Error())
 	}
 	defer rows.Close()
 
 	cts, cerr := rows.ColumnTypes()
 	if cerr != nil {
-		return false, writeErrorResponse(w, sqlstateGeneric, cerr.Error())
+		return false, nil, writeErrorResponse(w, sqlstateGeneric, cerr.Error())
 	}
-	return true, writeRowDescription(w, buildResultColumns(cts, resultFormats))
+	cols := buildResultColumns(cts, resultFormats)
+	oids = make([]uint32, len(cols))
+	for i, c := range cols {
+		oids[i] = c.oid
+	}
+	return true, oids, writeRowDescription(w, cols)
 }
 
 // buildResultColumns builds the pgColumn slice for cts, deciding per
@@ -487,6 +594,26 @@ func buildResultColumns(cts []*sql.ColumnType, resultFormats []int16) []pgColumn
 		oid := columnOID(ct)
 		useBinary := formatCodeFor(resultFormats, i) == 1 && binaryCapableOIDs[oid]
 		cols[i] = pgColumn{name: ct.Name(), oid: oid, binary: useBinary}
+	}
+	return cols
+}
+
+// buildResultColumnsFromOIDs is buildResultColumns' counterpart for
+// handleExecute reusing a Describe's already-cached OIDs (preparedStatement/
+// portal's resultOIDs) instead of computing them fresh: the OID identity
+// comes from that cache, but binary-vs-text is still decided fresh against
+// resultFormats, since a statement-level Describe's cached OIDs were
+// computed before any Bind existed to request a format at all (nil
+// resultFormats there always means text) -- only the OID itself, not the
+// format decision, needs to survive from Describe time to Execute time.
+// Column names are omitted (pgColumn.name) because handleExecute's caller,
+// sendDataRows, never reads them -- a portal-level Execute does not resend
+// RowDescription, so nothing here needs the name again.
+func buildResultColumnsFromOIDs(oids []uint32, resultFormats []int16) []pgColumn {
+	cols := make([]pgColumn, len(oids))
+	for i, oid := range oids {
+		useBinary := formatCodeFor(resultFormats, i) == 1 && binaryCapableOIDs[oid]
+		cols[i] = pgColumn{oid: oid, binary: useBinary}
 	}
 	return cols
 }
@@ -525,7 +652,6 @@ func handleExecute(ctx context.Context, w io.Writer, eq *extendedQueryConn, txSt
 	if !exists {
 		return false, txState, writeErrorResponse(w, sqlstateGeneric, fmt.Sprintf("prepared statement %q does not exist", p.stmtName))
 	}
-
 	kw := firstKeyword(ps.sql)
 	if txState == 'E' && kw != "COMMIT" && kw != "ROLLBACK" && kw != "END" {
 		return false, txState, writeErrorResponse(w, sqlstateInFailedTransaction,
@@ -538,11 +664,30 @@ func handleExecute(ctx context.Context, w io.Writer, eq *extendedQueryConn, txSt
 			return false, txState, writeErrorResponse(w, sqlstateGeneric, qerr.Error())
 		}
 		defer rows.Close()
-		cts, cerr := rows.ColumnTypes()
-		if cerr != nil {
-			return false, txState, writeErrorResponse(w, sqlstateGeneric, cerr.Error())
+		// Reuse whichever Describe already promised this client a
+		// RowDescription (the portal's own, if it was Described after
+		// Bind; else the statement's, from before Bind) instead of
+		// recomputing columnOID() fresh from this real query result --
+		// see preparedStatement.resultOIDs's doc comment for why those
+		// two can legitimately disagree, and why disagreeing here would
+		// silently send corrupt bytes for whichever OID the client was
+		// actually told to expect. A client that Executes without ever
+		// Describing (unusual, but not forbidden) has no promise to
+		// honor, so that case still recomputes live, as before.
+		oids := p.resultOIDs
+		if oids == nil {
+			oids = ps.resultOIDs
 		}
-		cols := buildResultColumns(cts, p.resultFormats)
+		var cols []pgColumn
+		if oids != nil {
+			cols = buildResultColumnsFromOIDs(oids, p.resultFormats)
+		} else {
+			cts, cerr := rows.ColumnTypes()
+			if cerr != nil {
+				return false, txState, writeErrorResponse(w, sqlstateGeneric, cerr.Error())
+			}
+			cols = buildResultColumns(cts, p.resultFormats)
+		}
 		sok, werr := sendDataRows(w, rows, cols)
 		if werr != nil {
 			return false, txState, werr

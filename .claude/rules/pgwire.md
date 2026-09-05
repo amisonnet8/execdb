@@ -245,6 +245,76 @@ SQLiteの文法には無い。**対処: `pg_type`だけは`CREATE TEMP TABLE`+
 （`.claude/rules/pgwire.md`全体の「サブセット、フルセットではない」
 という方針のまま）。
 
+## PHP・Ruby・Rust対応、および`Describe`/`Execute`のOID不整合バグ発見（フェーズ④完了後の追加）
+
+ODBC対応の後、続けてBash（`psql`）・PHP・Ruby・TypeScript・Rustへの対応可否を
+検討した。**Bash（`psql`）とTypeScript（node-postgresと同一パッケージ）は
+既存カバレッジと完全に重複するため見送った。** PHP（PDO_PGSQL）・Ruby
+（`pg` gem）は内部的にpsycopg2と同じ`libpq`をラップしているが、**PDOは
+デフォルトで"エミュレートされたprepare"（パラメータをクライアント側で
+文字列へ埋め込みSimple Queryとして送る）を使う**という、他のどのドライバとも
+異なる経路を通るため追加する価値があると判断した。Rustの`postgres`/
+`tokio-postgres`クレートは独自にワイヤープロトコルを再実装しており
+（libpq非依存）、実機検証の結果、他の7ドライバでは見つからなかった
+**2つの独立したExecDB側のバグ**を発見した。
+
+### バグ1: `ParameterDescription`のOID 0への無限再帰（tokio-postgres）
+
+tokio-postgresのデフォルト（型を指定しない）`query`/`execute`系APIは、
+パラメータの型を自己申告せず、サーバーの`ParameterDescription`応答に
+依存する。ExecDBが返す「未指定」を意味するOID 0を受け取ると、
+tokio-postgresは**OID 0が実際に何の型かを`pg_catalog.pg_type`/
+`pg_range`/`pg_namespace`へ問い合わせて解決しようとする**。OID 0は
+実在しないため0行が返り、tokio-postgresは**同じ問い合わせを再度発行し、
+これが無限に繰り返されクライアントのスタックオーバーフローに至る**
+（実機確認済み）。
+
+**対処: テストコード側で`prepare_typed`を使い、パラメータの型を
+事前に自己申告する**（pgJDBC/Npgsqlが既定で行っているのと同じ手法）。
+ExecDB側でグローバルな「未指定パラメータのデフォルトOID」を0からtext(25)
+へ変更する案も試したが、これは**Rust側の型チェックの厳格さと衝突する**
+（サーバーがtextと宣言した列に対し、Rustの`i32`のようなネイティブ型を
+バインドしようとすると`WrongType`エラーになる——他5ドライバはOID 0の
+ままで正しく動いているため、この案は不採用・revertした）。
+
+### バグ2: `Describe`と`Execute`で列の型（OID）が食い違う（ExecDB本体の潜在バグ、全ドライバに影響しうる）
+
+上記の対処後も、`SELECT $1`（`$1`をint4として`prepare_typed`宣言）が
+`error deserializing column 0`で失敗する問題が残った。原因はExecDB本体の
+既存の潜在バグだった——`handleExecute`（`pgextended.go`）が、**事前の
+`Describe`が既にクライアントへ送った`RowDescription`とは無関係に、
+実行時の実際のクエリ結果から`columnOID()`を再計算していた**。
+tokio-postgresは「文レベルの`Describe`だけを行い、ポータルレベルの
+`Describe`は行わない」という（Postgresプロトコル上正当な）呼び出し
+順序を使うため、この2つの計算結果が食い違う場面が初めて表面化した——
+文レベルの`Describe`はNULL仮バインドで列をtext(25)と判定して
+`RowDescription`で約束したのに対し、`Execute`は実際にBindされた値
+（int4）から再計算しint8(20)・バイナリ形式でデータを送ってしまい、
+**クライアントが約束された型と実際のバイト列の不整合により値を
+正しくデコードできなくなっていた**。
+
+**対処: `Describe`が確定させたOIDを`preparedStatement.resultOIDs`/
+`portal.resultOIDs`にキャッシュし、`Execute`はそれを再利用する**
+（バイナリ/テキストの判定だけは`Execute`時点で確定する`resultFormats`を
+使って都度計算し直す——`Describe`時点ではまだBindが起きておらず
+フォーマット要求が存在しないため）。**このバグは他の7ドライバでは
+一度も表面化しなかった**——pgJDBC/Npgsql/node-postgres等は基本的に
+ポータルレベルの`Describe`も行う、または値取得側が緩い（文字列を
+暗黙変換する）ため実害が無かった。tokio-postgresの型チェックの厳格さが
+初めてこの不整合を可視化した、という位置づけ。**この修正はドライバを
+問わず適用される、pgwire実装全体の正しさに関わる修正**である。
+
+副次的に、`SELECT $1`のような「プレースホルダそのものが結果列になる」
+問い合わせについて、文レベル`Describe`の仮バインドをNULLから
+「宣言されたパラメータ型に応じた代表値」（int4→`int64(0)`、text→`""`等、
+`representativeParamValues`）に変更した——宣言済みの型があるにも
+かかわらずNULLを仮バインドすると`columnOID`のScanTypeフォールバックが
+text(25)に落ちてしまうため。加えて`decodeBinaryParam`に`text`型の
+ケースを追加した（PostgresのtextはPostgresの"バイナリ"形式も生UTF-8
+バイト列そのものであり、tokio-postgresはデフォルトであらゆる
+パラメータをバイナリ形式で送るため、text宣言のパラメータでも
+バイナリ経路を通る）。
+
 ## 型マッピング（確定、フェーズ④Step 1〜2）
 
 SQLiteは動的型付け（型アフィニティ）のため、列の値の型が固定されない。

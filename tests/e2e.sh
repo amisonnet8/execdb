@@ -307,7 +307,7 @@ stop_server "$pid2"
 # PTY-only Ctrl+C check's established pattern above) -- it's shared
 # verbatim with CI's `drivers` job, so both paths exercise identically. ---
 bash "$ROOT/tests/drivers/run-all.sh" "$BIN" 15538 || fail "tests/drivers checks failed"
-pass "pgwire TCP: tests/drivers (python/node/java/dotnet/odbc) default-mode checks"
+pass "pgwire TCP: tests/drivers (python/node/java/dotnet/odbc/php/ruby/rust) default-mode checks"
 
 # --- pgwire authentication: -u/--user cleartext password (spec §8, phase 4
 #     Step 4). Correct credentials connect; a wrong password or a
