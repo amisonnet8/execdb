@@ -72,7 +72,7 @@ execdb> SELECT * FROM t;
 
 ## 詳しくは
 
-- **[インタラクティブガイド (NotebookLM)](https://notebook.google.com/notebook/f4c3426c-b394-4412-bb38-5d4174e2c636)**
+- **[インタラクティブガイド (Gemini Notebook)](https://notebook.google.com/notebook/f4c3426c-b394-4412-bb38-5d4174e2c636)**
   — ExecDBを対話形式で調べられるノートブック
 - **[`docs/tour/`](docs/tour/README_ja.md)** — 初めて使う方向けの、体験型・
   順を追った入門ガイド
