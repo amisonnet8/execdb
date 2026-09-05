@@ -77,14 +77,17 @@ jobs:
           name="execdb_${GITHUB_REF_NAME}_${{ matrix.goos }}_${{ matrix.goarch }}$ext"
           go build -trimpath -ldflags "-s -w -X main.version=$version" -o "$name" ./cmd/execdb
           sha256sum "$name" > "$name.sha256"
-          echo "ASSET=$name" >> "$GITHUB_ENV"
 
+      # A glob instead of a computed env var in `path:` -- referencing a
+      # dynamically $GITHUB_ENV-set variable via `${{ env.ASSET }}` here
+      # works fine at runtime but trips static analyzers ("Context access
+      # might be invalid: ASSET") since they can't see a name only known
+      # at script execution time. The working directory is fresh per job,
+      # so this glob can only match this step's own binary + checksum.
       - uses: actions/upload-artifact@v7
         with:
           name: execdb_${{ matrix.goos }}_${{ matrix.goarch }}
-          path: |
-            ${{ env.ASSET }}
-            ${{ env.ASSET }}.sha256
+          path: execdb_*
           if-no-files-found: error
 
   release:
