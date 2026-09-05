@@ -280,6 +280,11 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
   「フェーズ④Step 8（仕様書・ルール・PLAN・devcontainer統合）完了」節を参照。
   フェーズ④完了後、ユーザーとの相談で`docs/`への再構成（Step 9）→
   `tour/`入門ガイド（Step 10）という別枠の作業を追加することに決定。
+- **Step 10（`docs/tour/`入門ガイド）完了（2026-09-05）、これで
+  `docs/`への再構成（Step 9）→`tour/`（Step 10）という別枠作業も完了。**
+  詳細は下記「Step 10（`docs/tour/`入門ガイド）完了」節を参照。フェーズ④
+  完了後に積み上がった各種ドライバ検証・バグ修正（.NET/ODBC/PHP/Ruby/Rust）
+  とは独立した、ドキュメント整備の最後のピース。
 - **Step 9（`docs/`への再構成、`tour/`を除く）完了（2026-09-04）。**
   `execdb_spec.md`を`docs/spec/execdb_spec.md`へ移動（単一ファイルのまま、
   章立て・§番号は不変。ユーザー承認済みの方針——「CLAUDE.md/.claude/rules/等
@@ -1803,3 +1808,60 @@ tokio-postgresはデフォルトであらゆるパラメータをバイナリで
 **確認**: `make check`・`make race`・`make test`（8ドライバすべて`ok`）とも
 green。既存5ドライバ・REPL・その他e2eテストへの回帰なし（OID不整合バグの
 修正は基盤部分の変更のため、フルスイートを再実行して確認済み）。
+
+## Step 10（`docs/tour/`入門ガイド）完了（2026-09-05）
+
+Step 9（`docs/`への再構成）の時点で先送りにしていた最後の1点、
+`.claude/rules/directory-structure.md`が「実装完了後に作成する」と
+定義していた`docs/tour/`を新設した。
+
+**`docs/usage/`（索引的なリファレンス）・`docs/examples/`（1本ずつ
+自己完結したユースケース集）とは性質が異なる、「順番に読み進める」
+体験型の入門ガイド**として設計した——`README.md`（索引）＋`01`〜`04`の
+番号付き章立てで、後の章は前の章で導入した状態（作った`todos`テーブル、
+書き出した`mydb`スナップショット）を前提に進む。
+
+- **`01-first-steps.md`**: REPL起動、`CREATE TABLE`/`INSERT`/`SELECT`、
+  `.mode list`（既定）と`.mode column`+`.headers on`の違い、`.tables`/
+  `.schema`、`.exit`。「終了時に何も残らない」という事実で締め、次章への
+  ブリッジにした。
+- **`02-snapshots.md`**: ExecDBの核となる発想（永続化＝新しい実行ファイルを
+  書き出すこと）を`.snapshot`で体験し、`./mydb`がそのまま独立した実行
+  ファイルとして動くことを確認、`.overwrite`（自己上書き→自動終了）、
+  「`.exit`は保存しない」という原則、`-i`への軽い言及で締める。
+  `.claude/rules/cli-output.md`の保存確認プロンプトを設けない方針が
+  そのままユーザー向け説明の材料になった。
+  - `.overwrite`は完了後に自動で終了する（明示的な`.exit`が不要）ことを
+  実機確認した上で明記した——ドキュメント化されていなければ見落としやすい
+  挙動。
+- **`03-loading-data.md`**: `.import`（CSVからのテーブル作成、全列TEXT）、
+  `.dump`（replayableなSQLテキスト）、`.load`（**別スナップショットの
+  「データだけ」を、今起動しているエンジンに取り込む**——スナップショット
+  自体をまるごと実行するのとは異なる、という区別を明示）。
+- **`04-external-connections.md`**: `-p`でpgwireを起動し`psql`から接続、
+  DDL拒否（SQLSTATE相当のエラーメッセージ）によるアクセス制御、
+  `docs/examples/mock-server.md`への誘導（9ドライバ全部のコード片を
+  ここには複製せず、役割を分離）、`-u`/`EXECDB_PASSWORD`によるオプトイン
+  認証、`-n`（サーバーモード）+`SIGTERM`での自動保存。
+
+**全ページのコマンド・出力は、他の`docs/`配下の文書と同じ方針で
+`bin/execdb`（`.import`/`.dump`/`.load`/`.snapshot`/`.overwrite`）・
+`psql`（DDL拒否・`-u`認証の成功/失敗）へ実際に流し込んで実測した内容を
+そのまま掲載している**（`/tmp`のスクラッチで検証、恒久的なテストとしては
+追加していない——`docs/examples/`の各ページ作成時と同じ「ドキュメントの
+正確性は都度実行して確認する」運用）。
+
+**関連ファイルの更新:**
+- `.claude/rules/directory-structure.md`: ツリー図の`docs/tour/`の
+  コメントを「作成予定」から実態（4章構成、読む順序が意味を持つ）へ更新
+- `README.md`/`README_ja.md`: 「Learn more」/「詳しくは」に`docs/tour/`を
+  追加（末尾ではなく先頭——初見のユーザーに一番読んでほしいものを最初に
+  出す判断）
+- `docs/usage/README.md`/`docs/examples/README.md`: 冒頭でお互いと
+  `docs/tour/`を相互参照するよう追記（「リファレンスを探しているなら
+  ここではない」「ウォークスルーが欲しいなら`tour/`へ」という誘導）
+
+**確認**: `make check`・`make test`ともgreen（ドキュメントのみの追加で
+コード変更なし、念のため実行）。これにより`.claude/rules/directory-structure.md`
+が定義する`docs/`4ディレクトリ（`spec`/`usage`/`examples`/`tour`）が
+すべて出揃った。

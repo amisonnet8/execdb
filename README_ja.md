@@ -72,6 +72,8 @@ execdb> SELECT * FROM t;
 
 ## 詳しくは
 
+- **[`docs/tour/`](docs/tour/)** — 初めて使う方向けの、体験型・順を追った
+  入門ガイド（英語）
 - **[`docs/usage/`](docs/usage/)** — CLIオプション・REPLコマンドのリファレンス
 - **[`docs/examples/`](docs/examples/)** — CIテスト用DB、バグ再現データの共有、
   モックAPIサーバー、SQLサンドボックス

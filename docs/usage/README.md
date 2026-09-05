@@ -1,9 +1,11 @@
 # Usage reference
 
 Quick-reference documentation for running ExecDB and using it day to day.
-This is index/table-driven material for looking things up; for the *why*
-behind a given design (access control, persistence model, wire protocol
-internals), see [`docs/spec/execdb_spec.md`](../spec/execdb_spec.md).
+This is index/table-driven material for looking things up, not a
+walkthrough — if you're new to ExecDB, [`docs/tour/`](../tour/) is a
+better starting point. For the *why* behind a given design (access
+control, persistence model, wire protocol internals), see
+[`docs/spec/execdb_spec.md`](../spec/execdb_spec.md).
 
 - [CLI options](cli-options.md) — every startup flag (`-p`, `-n`, `-u`, ...)
 - [REPL commands](repl-commands.md) — every dot-command (`.tables`,

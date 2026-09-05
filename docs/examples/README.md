@@ -1,8 +1,11 @@
 # Examples
 
-Task-oriented walkthroughs for common ways to use ExecDB. For a plain
-command/flag reference instead, see [`docs/usage/`](../usage/); for the
-full design rationale, see [`docs/spec/execdb_spec.md`](../spec/execdb_spec.md).
+Task-oriented walkthroughs for common ways to use ExecDB. New to ExecDB
+and want a guided, step-by-step introduction first? See
+[`docs/tour/`](../tour/) instead — each page here is self-contained and
+assumes you already know the basics. For a plain command/flag reference,
+see [`docs/usage/`](../usage/); for the full design rationale, see
+[`docs/spec/execdb_spec.md`](../spec/execdb_spec.md).
 
 - **[CI/CD: an instant test database](ci-testing.md)** — bake a schema +
   seed data into a binary once, then have every test job just run it.

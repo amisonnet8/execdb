@@ -68,6 +68,8 @@ any Postgres client or driver can connect to it as-is.
 
 ## Learn more
 
+- **[`docs/tour/`](docs/tour/)** — a hands-on, step-by-step walkthrough for
+  first-time users
 - **[`docs/usage/`](docs/usage/)** — CLI flags and REPL command reference
 - **[`docs/examples/`](docs/examples/)** — CI test databases, sharing a bug
   repro, a mock API server, a SQL sandbox
