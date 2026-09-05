@@ -10,9 +10,9 @@ full design rationale, see [`docs/spec/execdb_spec.md`](../spec/execdb_spec.md).
   `.snapshot` a broken data state and hand someone the file instead of a
   list of setup steps.
 - **[A zero-config mock API / database server](mock-server.md)** — point
-  psql, psycopg, node-postgres, pgx, or JDBC at ExecDB with no install and
-  no ExecDB-specific driver flags, including copy-pasteable connection code
-  for each.
+  psql, psycopg, node-postgres, pgx, JDBC, Npgsql, PDO_PGSQL, the `pg` gem,
+  the Rust `postgres` crate, or any ODBC tool (Excel, Power BI, Access) at
+  ExecDB with no install, including copy-pasteable connection code for each.
 - **[A zero-setup SQL sandbox](sql-sandbox.md)** — a full SQL engine
   (views/indexes/triggers/transactions) for learning or experimenting,
   nothing to install or clean up.

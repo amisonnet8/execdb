@@ -32,8 +32,9 @@ psql -h 127.0.0.1 -p 5432 -U any -d any -c 'SELECT * FROM products;'
 
 ## Connect from your application
 
-Every connection below uses each driver's own **default settings** — no
-ExecDB-specific flags or workarounds needed (spec §8's compatibility goal).
+Nearly every connection below uses each driver's own **default settings**
+— no ExecDB-specific flags or workarounds needed (spec §8's compatibility
+goal). **Npgsql (.NET) is the one exception** — see its section below.
 Only `DDL` (`CREATE TABLE` etc.) is rejected over this interface — DML and
 transactions work normally; see
 [`docs/spec/execdb_spec.md`](../spec/execdb_spec.md) §2 for the access-control
@@ -76,6 +77,81 @@ Connection conn = DriverManager.getConnection("jdbc:postgresql://127.0.0.1:5432/
 Statement st = conn.createStatement();
 ResultSet rs = st.executeQuery("SELECT name, price FROM products");
 ```
+
+### .NET (Npgsql)
+
+```csharp
+using Npgsql;
+
+await using var conn = new NpgsqlConnection(
+    "Host=127.0.0.1;Port=5432;Username=any;Database=any;Server Compatibility Mode=NoTypeLoading");
+await conn.OpenAsync();
+
+await using var cmd = new NpgsqlCommand("SELECT name, price FROM products", conn);
+await using var reader = await cmd.ExecuteReaderAsync();
+while (await reader.ReadAsync())
+    Console.WriteLine($"{reader.GetString(0)} {reader.GetDouble(1)}");
+```
+
+Npgsql needs `Server Compatibility Mode=NoTypeLoading` in the connection
+string — without it, Npgsql's own connection setup queries real
+PostgreSQL system catalogs (to build its type cache) that don't exist in
+ExecDB. This is a standard Npgsql option for non-genuine-Postgres
+backends (CockroachDB/Redshift users pass the same flag), not something
+ExecDB adds.
+
+### PHP (PDO_PGSQL)
+
+```php
+<?php
+$pdo = new PDO("pgsql:host=127.0.0.1;port=5432;dbname=any;user=any");
+foreach ($pdo->query("SELECT name, price FROM products") as $row) {
+    echo "{$row['name']} {$row['price']}\n";
+}
+```
+
+### Ruby (`pg` gem)
+
+```ruby
+require 'pg'
+
+conn = PG.connect(host: '127.0.0.1', port: 5432, dbname: 'any', user: 'any')
+conn.exec("SELECT name, price FROM products") do |result|
+  result.each { |row| puts "#{row['name']} #{row['price']}" }
+end
+```
+
+### Rust (`postgres` crate)
+
+```rust
+use postgres::{Client, NoTls};
+
+let mut client = Client::connect("host=127.0.0.1 port=5432 dbname=any user=any", NoTls)?;
+for row in client.query("SELECT name, price FROM products", &[])? {
+    let name: &str = row.get(0);
+    let price: f64 = row.get(1);
+    println!("{name} {price}");
+}
+```
+
+### ODBC (psqlODBC) — Excel, Power BI, Access, and other ODBC tools
+
+Install the official PostgreSQL ODBC driver (`odbc-postgresql` on
+Debian/Ubuntu, "PostgreSQL Unicode" in Windows' ODBC Data Source
+Administrator) and connect with:
+
+```
+Driver=PostgreSQL Unicode;Server=127.0.0.1;Port=5432;Database=any;Uid=any;Pwd=;
+```
+
+```sh
+isql -v -k "Driver=PostgreSQL Unicode;Server=127.0.0.1;Port=5432;Database=any;Uid=any;Pwd=;"
+```
+
+Beyond plain queries, ExecDB also answers the schema-browsing calls
+(`SQLTables`/`SQLColumns`) these tools use to show you a list of tables
+and columns to pick from — so "Get Data > From ODBC" in Excel or Power BI
+sees your real ExecDB schema, not an empty list.
 
 ## Where these examples come from
 
