@@ -1,5 +1,7 @@
 # 2. Snapshots: the binary *is* the data
 
+*日本語版はこちら: [02-snapshots_ja.md](02-snapshots_ja.md)*
+
 This is the one idea that makes ExecDB different from "just run SQLite":
 **persistence means writing out a new executable**, not a `.db` file next
 to it. One command does it:

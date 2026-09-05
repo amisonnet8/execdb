@@ -1,5 +1,7 @@
 # tests/drivers
 
+*日本語版はこちら: [README_ja.md](README_ja.md)*
+
 Cross-language driver checks for ExecDB's pgwire implementation (spec §8,
 phase 4 Step 7). `tests/pgclient` (Go, pgx) already covers the protocol in
 depth -- transaction isolation, `25P02`, disconnect/`CancelRequest`

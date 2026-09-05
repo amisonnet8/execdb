@@ -1,5 +1,7 @@
 # CI/CD: an instant test database
 
+*日本語版はこちら: [ci-testing_ja.md](ci-testing_ja.md)*
+
 The idea: build one executable that already has your schema and seed data
 baked in, then have every test job just run it — no database container, no
 migration step, no waiting for a service to become healthy.

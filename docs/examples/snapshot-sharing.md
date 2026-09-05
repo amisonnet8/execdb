@@ -1,5 +1,7 @@
 # Sharing a bug repro (or any data state) as a runnable file
 
+*日本語版はこちら: [snapshot-sharing_ja.md](snapshot-sharing_ja.md)*
+
 When a bug only shows up with specific data in the database, the usual fix
 is a wall of setup instructions ("run these 12 SQL statements, in this
 order..."). With ExecDB, you share the *database itself*.

@@ -1,5 +1,7 @@
 # Examples
 
+*日本語版はこちら: [README_ja.md](README_ja.md)*
+
 Task-oriented walkthroughs for common ways to use ExecDB. New to ExecDB
 and want a guided, step-by-step introduction first? See
 [`docs/tour/`](../tour/) instead — each page here is self-contained and

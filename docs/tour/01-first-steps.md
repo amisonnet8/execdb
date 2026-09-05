@@ -1,5 +1,7 @@
 # 1. First steps: the REPL
 
+*日本語版はこちら: [01-first-steps_ja.md](01-first-steps_ja.md)*
+
 Launch it with no arguments and you get an interactive SQL console, backed
 by an empty in-memory database:
 

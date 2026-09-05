@@ -1,5 +1,7 @@
 # A zero-config mock API / database server
 
+*日本語版はこちら: [mock-server_ja.md](mock-server_ja.md)*
+
 Point any PostgreSQL client or ORM at ExecDB without installing or
 configuring an actual PostgreSQL server. Useful for frontend development
 against a fake backend, demos, or throwaway integration testing.

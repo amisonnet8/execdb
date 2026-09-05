@@ -1,5 +1,7 @@
 # 3. Getting data in and out
 
+*日本語版はこちら: [03-loading-data_ja.md](03-loading-data_ja.md)*
+
 ## Loading a CSV
 
 `.import` bulk-loads a CSV file into a table, creating it from the header

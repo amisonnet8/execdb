@@ -16,7 +16,7 @@ DBエンジンとデータ領域を1つの実行ファイル内に保持する�
 ワイヤープロトコルのサブセット経由で接続できるため、既存のPostgres用
 ドライバ資産（JDBC、psycopg、node-postgres、Npgsql、pgx等）が、ほぼ
 ExecDB側の追加設定なしに利用できます（唯一の既知の例外はNpgsqlで、
-詳細は[`docs/spec/execdb_spec.md`](docs/spec/execdb_spec.md)§8を参照）。
+詳細は[`docs/spec/execdb_spec_ja.md`](docs/spec/execdb_spec_ja.md)§8を参照）。
 
 ## インストール
 
@@ -77,7 +77,7 @@ execdb> SELECT * FROM t;
 - **[`docs/usage/`](docs/usage/)** — CLIオプション・REPLコマンドのリファレンス
 - **[`docs/examples/`](docs/examples/)** — CIテスト用DB、バグ再現データの共有、
   モックAPIサーバー、SQLサンドボックス
-- **[`docs/spec/execdb_spec.md`](docs/spec/execdb_spec.md)** — 詳細な設計・仕様書
+- **[`docs/spec/execdb_spec_ja.md`](docs/spec/execdb_spec_ja.md)** — 詳細な設計・仕様書
 - **[`PLAN.md`](PLAN.md)** — 実装の進捗
 
 English version: [README.md](README.md)

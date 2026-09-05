@@ -285,6 +285,13 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
   詳細は下記「Step 10（`docs/tour/`入門ガイド）完了」節を参照。フェーズ④
   完了後に積み上がった各種ドライバ検証・バグ修正（.NET/ODBC/PHP/Ruby/Rust）
   とは独立した、ドキュメント整備の最後のピース。
+- **Markdownドキュメントの英日併記化完了（2026-09-05）。** `CLAUDE.md`/
+  `PLAN.md`/`.claude/rules`を除く全Markdownドキュメント（17ペア）を
+  英語/日本語両対応にした（命名規則は既存の`README.md`/`README_ja.md`と
+  同じ、英語デフォルト＋`_ja`サフィックス）。日本語のみだった
+  `docs/spec/execdb_spec.md`は英語をデフォルトへ差し替え、既存の日本語
+  内容は`execdb_spec_ja.md`へ移した。詳細は下記「Markdownドキュメントの
+  英日併記化」節を参照。
 - **Step 9（`docs/`への再構成、`tour/`を除く）完了（2026-09-04）。**
   `execdb_spec.md`を`docs/spec/execdb_spec.md`へ移動（単一ファイルのまま、
   章立て・§番号は不変。ユーザー承認済みの方針——「CLAUDE.md/.claude/rules/等
@@ -1865,3 +1872,59 @@ Step 9（`docs/`への再構成）の時点で先送りにしていた最後の1
 コード変更なし、念のため実行）。これにより`.claude/rules/directory-structure.md`
 が定義する`docs/`4ディレクトリ（`spec`/`usage`/`examples`/`tour`）が
 すべて出揃った。
+
+## Markdownドキュメントの英日併記化（2026-09-05）
+
+Step 10完了直後、ユーザーから「英語版のみ・日本語版のみのMarkdownドキュメント
+が混在しているので、両方揃えてほしい（`CLAUDE.md`/`PLAN.md`/`.claude/rules`は
+対象外）」という依頼を受けた。命名規則は`AskUserQuestion`でユーザーに確認し、
+**既存の`README.md`/`README_ja.md`と同じ考え方（英語がデフォルトファイル名、
+日本語は`_ja`サフィックス）**で統一する方針が確定した。
+
+**対象範囲の判断:** 除外指定（`CLAUDE.md`・`PLAN.md`・`.claude/rules/`）以外の
+Markdownファイルすべてが対象、という文字通りの解釈を採用し、
+`tests/README.md`・`tests/drivers/README.md`（開発者向けだが除外リストに
+入っていない）も含めた。対象は以下の17ペア（うち1ペアは既存の`README.md`/
+`README_ja.md`のみ、他16ファイルは新規に対になるファイルを作成）:
+
+| ディレクトリ | ファイル |
+| :--- | :--- |
+| （ルート） | `README.md`/`README_ja.md`（既存、spec/tourへのリンクのみ更新） |
+| `docs/spec/` | `execdb_spec.md`/`execdb_spec_ja.md` |
+| `docs/usage/` | `README.md`、`cli-options.md`、`repl-commands.md` |
+| `docs/examples/` | `README.md`、`ci-testing.md`、`mock-server.md`、`snapshot-sharing.md`、`sql-sandbox.md` |
+| `docs/tour/` | `README.md`、`01`〜`04`の4章 |
+| `tests/` | `README.md` |
+| `tests/drivers/` | `README.md` |
+
+**`docs/spec/execdb_spec.md`だけは逆方向の対応が必要だった:** Step 9で
+日本語のまま`docs/spec/`へ移動していたこのファイルは、他の`docs/`配下
+（`usage`/`examples`/`tour`）が全て英語デフォルトなのとは逆に、唯一
+日本語のみの状態だった。**英語がデフォルトという規則に合わせるため、
+既存の日本語の中身をそのまま`execdb_spec_ja.md`へ移し、`execdb_spec.md`には
+新たに全764行を英訳したものを書いた**（章立て・§番号・表・コードブロック
+・ASCIIのライフサイクル図はすべて維持し、地の文とテーブルセルのみ翻訳）。
+`git show HEAD:docs/spec/execdb_spec.md`で元の内容を確定的に取得してから
+`execdb_spec_ja.md`へコピーすることで、翻訳作業中の取り違えによる内容の
+毀損を防いだ。
+
+**`CLAUDE.md`・`.claude/rules/`からの`execdb_spec.md§N`という節番号引用は
+意図的にそのまま**（対象外指定のため不変更）——これらのファイル自体は
+Claude Code自身が読む日本語の作業指示であり、引用先の`execdb_spec.md`が
+英語になっても§番号による引用という慣習自体は言語に依存せず成立する
+ため、実害はないと判断した。
+
+**各ページ冒頭に相互リンクを追加:** `README.md`/`README_ja.md`の既存の
+パターン（「日本語版はこちら」/「English version:」）を全ページの
+タイトル直下に機械的に適用した。あわせて、**日本語版から他ページへの
+リンクは、存在する場合は日本語版（`_ja`）を指すよう張り替えた**
+（例: `docs/usage/README_ja.md`は`cli-options_ja.md`・
+`repl-commands_ja.md`・`execdb_spec_ja.md`を参照する。英語版は従来どおり
+英語版同士でリンクする）。トップレベルの`README_ja.md`も、
+`docs/spec/execdb_spec.md`への参照を`execdb_spec_ja.md`へ更新した。
+
+**確認**: `make check`ともgreen（ドキュメントのみの変更でコード変更
+なし）。Markdown内の相対リンク・見出しアンカー（日本語の見出しテキストが
+GitHubのMarkdownアンカー生成でそのまま使われる前提）は目視で照合確認。
+`make test`は実行していない（コード変更が無いフェーズ④完了後の純粋な
+ドキュメント作業のため、小規模な修正の扱いに準じた）。

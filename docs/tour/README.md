@@ -1,5 +1,7 @@
 # Tour
 
+*日本語版はこちら: [README_ja.md](README_ja.md)*
+
 A hands-on walkthrough of ExecDB for people who haven't used it before.
 Each chapter builds on the previous one and takes a few minutes — read
 them in order with a terminal open, running the commands as you go.

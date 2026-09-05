@@ -1,5 +1,7 @@
 # 4. Talking to it from other tools
 
+*日本語版はこちら: [04-external-connections_ja.md](04-external-connections_ja.md)*
+
 Everything so far has used the REPL directly. Add `-p ADDR` at startup and
 ExecDB also speaks a PostgreSQL-compatible wire protocol on that address —
 the REPL and the network listener share the same live data, at the same

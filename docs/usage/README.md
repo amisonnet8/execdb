@@ -1,5 +1,7 @@
 # Usage reference
 
+*日本語版はこちら: [README_ja.md](README_ja.md)*
+
 Quick-reference documentation for running ExecDB and using it day to day.
 This is index/table-driven material for looking things up, not a
 walkthrough — if you're new to ExecDB, [`docs/tour/`](../tour/) is a

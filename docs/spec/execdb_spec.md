@@ -1,273 +1,260 @@
-# 🗃️ ExecDB 仕様書 (Specification Draft)
+# 🗃️ ExecDB Specification (Draft)
 
-**ExecDB** は、DBエンジンとデータ領域を1つの実行ファイル内に保持する、環境構築不要のポータブルな単一バイナリRDBMSです。
+*日本語版はこちら: [execdb_spec_ja.md](execdb_spec_ja.md)*
+
+**ExecDB** is an environment-setup-free, portable single-binary RDBMS that keeps both the database engine and the data itself inside one executable file.
 
 **License:** MIT
 
 ---
 
-## 1. コアコンセプト
+## 1. Core concepts
 
-* **Data-in-Binary (単一バイナリ完結):** 実行ファイル内にデータ領域を持ち、外部のDBファイルや複雑な環境構築、Docker Volumeマウントを一切不要にします。
-* **In-Memory Operations:** 起動時に全データをメモリ上に展開し、すべてのクエリ操作をメモリ速度（超低遅延）で処理します。
-* **Snapshot Persistence (別名実行ファイルの出力):** 停止時（または実行中の保存指示）に、メモリ上の最新データを保持した**新しい実行ファイル（別名）**を生成して永続化します。元の実行ファイルを維持することで、安全なスナップショット作成やデータ配布を容易にします。
-* **Zero-Auth & Lightweight:** ユーザー管理、権限、ログインなどの概念を全削ぎし、ローカル開発・テスト・コンテナ環境でのシームレスな使い勝手を追求します。デフォルトはZero-Authですが、`--user`（§9）でオプトインの手軽な認証（単一の名前＋パスワードのキー、ユーザー管理の概念は持たない）を有効化することもできます。
+* **Data-in-Binary (single-binary self-containment):** The executable holds its own data region, eliminating any need for a separate DB file, elaborate environment setup, or Docker volume mounts.
+* **In-Memory Operations:** All data is unpacked into memory at startup, so every query runs at memory speed (ultra-low latency).
+* **Snapshot Persistence (a.k.a. writing out a differently-named executable):** On shutdown (or on an explicit save instruction while running), the latest in-memory data is persisted by generating a **new executable file (under a different name)** that embeds it. Keeping the original executable untouched makes safe snapshotting and data distribution easy.
+* **Zero-Auth & Lightweight:** ExecDB strips away the concepts of user management, permissions, and login entirely, pursuing frictionless usability for local development, testing, and container environments. Zero-Auth is the default, but `--user` (§9) can opt in to lightweight authentication (a single name+password key — there is no concept of user management).
 
-**CLI出力言語:** REPLのメッセージ、エラーメッセージ、`--help`、ログ出力等、CLIが出力する文字列は基本的に**英語**とする。国際的なOSSとしての公開・利用を想定するため。
+**CLI output language:** Strings the CLI emits — REPL messages, error messages, `--help`, log output, etc. — are, as a rule, in **English**, since ExecDB is meant to be published and used as an international OSS project.
 
-**ログ出力先:** ログ・診断メッセージは**標準エラー出力（stderr）のみ**とし、ログファイルの生成・ローテーション等の機構は持たない。単一バイナリで完結するというコアコンセプトに合わせ、副産物としてのログファイルを生成しない設計とする。REPLのクエリ結果は標準出力（stdout）に出力するため、両者は分離される。`--no-repl`でサーバーモード稼働させる場合の永続的なログ保存は、`2> execdb.log`のようなリダイレクトや、Docker/systemd等の既存運用基盤に委ねる。`-q`/`--quiet`（§9）で出力自体を抑制することは可能。
+**Log destination:** Log/diagnostic messages go to **stderr only**; there is no log-file generation or rotation mechanism. This keeps with the core concept of self-containment in a single binary — the design deliberately avoids producing log files as a side effect. REPL query results go to stdout, so the two are cleanly separated. Persisting logs long-term when running in server mode (`--no-repl`) is left to redirection (e.g. `2> execdb.log`) or existing operational infrastructure (Docker/systemd/etc.). `-q`/`--quiet` (§9) can suppress this output entirely.
 
 ---
 
-## 2. インターフェースとアクセス制御
+## 2. Interfaces and access control
 
-安全な運用とシンプルなアクセス制御のため、操作経路によって実行できるクエリの種類（アクセス権限）を明確に分離します。
+For safe operation and simple access control, the kinds of queries allowed (access rights) are clearly separated by access path.
 
-| インターフェース | 役割 | 許可される操作 |
+| Interface | Role | Permitted operations |
 | :--- | :--- | :--- |
-| **対話式コンソール (REPL)** | 起動時にターミナル上で直接開始。構造定義およびデータ管理用。 | **DDL**, **DML**, **TCL**, 専用制御コマンド |
-| **外部 I/F (PostgreSQL互換ワイヤープロトコル)** | バックグラウンドで待機。アプリケーションや外部ツールからのデータ操作用。 | **DML**, **TCL** *(※ DDLは拒否)* |
+| **Interactive console (REPL)** | Started directly on the terminal at launch. For schema definition and data management. | **DDL**, **DML**, **TCL**, dedicated control commands |
+| **External I/F (PostgreSQL-compatible wire protocol)** | Listens in the background. For data manipulation from applications and external tools. | **DML**, **TCL** *(DDL is rejected)* |
 
-### クエリ種別の定義
-* **DDL (データ定義言語):** `CREATE TABLE`, `DROP TABLE`, `ALTER TABLE`, `CREATE VIEW`, `CREATE INDEX`, `CREATE TRIGGER` 等
-* **DML (データ操作言語):** `SELECT`, `INSERT`, `UPDATE`, `DELETE` 等
-* **TCL (トランザクション制御言語):** `BEGIN`, `COMMIT`, `ROLLBACK`
+### Query category definitions
+* **DDL (Data Definition Language):** `CREATE TABLE`, `DROP TABLE`, `ALTER TABLE`, `CREATE VIEW`, `CREATE INDEX`, `CREATE TRIGGER`, etc.
+* **DML (Data Manipulation Language):** `SELECT`, `INSERT`, `UPDATE`, `DELETE`, etc.
+* **TCL (Transaction Control Language):** `BEGIN`, `COMMIT`, `ROLLBACK`
 
-### 同時実行制御 (Concurrency Control)
-REPL と外部 I/F は、内部SQLエンジンに対する2つの独立したクライアントとして扱う。ロック・トランザクション分離レベルなどの同時実行制御は、ExecDB独自には実装せず、内部SQL互換エンジン（7章参照）が標準で備える機構にそのまま準拠する。ExecDB側のアクセス制御レイヤー（本章の許可/拒否ルール）と、エンジン側の排他制御レイヤーは役割を分離する。
+### Concurrency control
+The REPL and the external I/F are treated as two independent clients of the internal SQL engine. ExecDB does not implement its own concurrency control (locking, transaction isolation levels, etc.); it defers entirely to whatever mechanisms the internal SQL-compatible engine (chapter 7) provides out of the box. The ExecDB-side access-control layer (this chapter's allow/deny rules) and the engine-side exclusion-control layer are kept as separate responsibilities.
 
-**実現手段:** REPL・外部I/Fの1接続はそれぞれ、`engine`パッケージの`DB.Session(ctx)`が返す専有SQLiteコネクション（内部的には`modernc.org/sqlite`の`memdb` VFS上で同一インメモリDBを指す別コネクション、7章参照）に対応する。`BEGIN`/`COMMIT`/`ROLLBACK`はそのコネクション上でSQL文としてそのまま実行され、他コネクションとのロック衝突時の待機・失敗はSQLite自身のbusy-handler機構（`busy_timeout`）に委ねる——ExecDBが独自にロックやキュー、コネクション間の調停を実装することはない。なお`engine.DB`がGoレベルで持つ排他制御（`sync.RWMutex`）は、コネクションの差し替えや`Close`などDB自体のライフサイクル・メタデータ（`Info()`が返す情報等）を保護するためのものであり、SQL実行そのものの同時実行制御ではない（両者は明確に別レイヤーであり、上記の原則と矛盾しない）。
+**How this is achieved:** each REPL/external-I/F connection corresponds to a dedicated SQLite connection returned by the `engine` package's `DB.Session(ctx)` (internally, a distinct connection pointing at the same in-memory DB over `modernc.org/sqlite`'s `memdb` VFS — see chapter 7). `BEGIN`/`COMMIT`/`ROLLBACK` are executed as plain SQL statements on that connection, and any waiting/failure from lock conflicts with other connections is left to SQLite's own busy-handler mechanism (`busy_timeout`) — ExecDB never implements its own locking, queueing, or inter-connection arbitration. The Go-level exclusion (`sync.RWMutex`) that `engine.DB` itself holds exists only to protect the DB's own lifecycle/metadata (connection swapping, `Close`, the information `Info()` returns) — it is not concurrency control for SQL execution itself (the two are clearly separate layers, and this does not contradict the principle above).
 
-### `SET`/`SHOW`等のセッションコマンド（第3の区分）
+### `SET`/`SHOW` and other session commands (a third category)
 
-外部I/F経由で受け取る文は、上表の「DML/TCLは許可・DDLは拒否」という二分法だけ
-では説明できないものが存在する。PostgreSQLドライバ（特にpgJDBC）は接続直後に
-`SET extra_float_digits = 3`のようなセッションパラメータ設定コマンドを自動的に
-送ってくるが、SQLiteには`SET`/`SHOW`という文自体が存在しないため、そのまま
-内部SQLエンジンへ渡すと構文エラーになり、接続そのものが確立できない。
+Statements arriving over the external I/F include some that the above two-way split ("DML/TCL allowed, DDL rejected") cannot describe. PostgreSQL drivers (pgJDBC in particular) automatically send session-parameter-setting commands like `SET extra_float_digits = 3` right after connecting, but SQLite has no `SET`/`SHOW` statements at all — passing them straight to the internal SQL engine as-is produces a syntax error, and the connection itself can never be established.
 
-`SET`/`SHOW`は「許可してSQLiteへ渡す」でも「DDLのように拒否する」でもない
-**第3の区分**として扱う。外部I/F層が内部SQLエンジンへ渡す前に横取りし、
-接続ごとのメモリ上のマップへ値を保持するだけで（SQLite側の設定は実際には
-何も変更しない）、`SET`には`CommandComplete("SET")`を、`SHOW`にはその値を
-1列1行の結果として返す。DDLの拒否のような`ErrorResponse`は返さない——
-ドライバから見ればコマンドが正常に成功したように見える必要があるため。
-詳細は§8参照。
+`SET`/`SHOW` are treated as a **third category** that is neither "allowed and passed to SQLite" nor "rejected like DDL." The external-I/F layer intercepts them before they reach the internal SQL engine and simply keeps the value in an in-memory, per-connection map (SQLite's own settings are never actually changed): `SET` gets a `CommandComplete("SET")`, and `SHOW` gets its value back as a one-column, one-row result. Neither returns an `ErrorResponse` the way DDL rejection does — from the driver's point of view, the command needs to look like it succeeded normally. See §8 for details.
 
 ---
 
-## 3. REPL コマンド体系
+## 3. REPL command set
 
-対話式コンソール(REPL)では、SQL文に加えて `.` で始まる専用制御コマンド(ドットコマンド)を実行できる。コマンド体系は SQLite CLI (`sqlite3`) を踏襲しつつ、ExecDBの単一インメモリDBというコンセプトに合わせて取捨選択する。
+The interactive console (REPL) can run dedicated control commands (dot-commands) starting with `.`, in addition to SQL statements. The command set follows the `sqlite3` CLI, adapted to fit ExecDB's single-in-memory-DB concept.
 
-### 採用する基本コマンド(SQLite踏襲)
+### Basic commands adopted (following SQLite)
 
-| コマンド | 役割 |
+| Command | Role |
 | :--- | :--- |
-| `.tables` | テーブル一覧表示 |
-| `.schema [table]` | CREATE文（スキーマ）表示 |
-| `.exit [CODE]` / `.quit [CODE]` | REPL終了（自動保存は行わない。保存確認のプロンプトも出さず即座に終了する。§4参照。`CODE`省略時は正常終了、指定時はそのコードで即座にプロセスを終了する） |
-| `.help` | コマンド一覧表示 |
-| `.headers on\|off` | 結果表示にカラム名を出すか |
-| `.mode MODE` | 出力形式。`list`（既定、`\|`区切り・ヘッダなし）/`column`（列幅揃え、切替時`.headers`自動on）/`csv`（RFC 4180、CRLF）/`json`（配列。BLOBは16進文字列）/`line`（1列1行）の5種のみ採用する（`quote`/`insert`/`tabs`/`markdown`/`box`/`html`等の装飾系はCLI出力方針（`.claude/rules/cli-output.md`）により不採用） |
-| `.import FILE TABLE` | CSVファイルをテーブルへ読み込む。**`.mode`の設定に関わらず常にCSVとして読む**（sqlite3は`.mode`に連動するが、「`.import`は常にCSV」と単純化——意図的な相違）。`TABLE`が存在しなければ1行目を列名として全TEXT列で自動`CREATE`、存在すれば1行目からデータとして扱う。**行ごとのフィールド数が列数と一致しない場合はその行番号を含むエラーで処理全体を中断し、1行も投入しない**（sqlite3は警告のうえ補完/切り捨てして継続するが、シードデータ投入という主用途では黙って歪んだデータが入る方が有害と判断——意図的な相違） |
-| `.dump [PATTERN]` | `PATTERN`（SQLのLIKEパターン、省略時は全テーブル）に一致するテーブルのスキーマ・データと、それらに属するindex/view/triggerをSQL文としてダンプする。値のリテラル化はSQLite自身の`quote()`関数に委譲する |
+| `.tables` | List table names |
+| `.schema [table]` | Show `CREATE` statements (schema) |
+| `.exit [CODE]` / `.quit [CODE]` | Exit the REPL (no auto-save, and no save-confirmation prompt either — exits immediately. See §4. Without `CODE`, exits normally; with it, exits the process immediately with that code) |
+| `.help` | List commands |
+| `.headers on\|off` | Whether to show column names in results |
+| `.mode MODE` | Output format. Only five are adopted: `list` (default, `\|`-separated, no header) / `column` (aligned column widths, auto-enables `.headers` when switched to) / `csv` (RFC 4180, CRLF) / `json` (array; BLOBs as hex strings) / `line` (one `name = value` per line). Decorative modes (`quote`/`insert`/`tabs`/`markdown`/`box`/`html`, etc.) are not adopted, per the CLI output policy (`.claude/rules/cli-output.md`) |
+| `.import FILE TABLE` | Load a CSV file into a table. **Always reads it as CSV regardless of the `.mode` setting** (sqlite3 ties this to `.mode`, but ExecDB deliberately simplifies to "`.import` is always CSV" — an intentional difference). If `TABLE` doesn't exist, it's auto-`CREATE`d from the first line as column names, all-`TEXT`; if it exists, the first line is treated as data too. **If a row's field count doesn't match the column count, the whole load is aborted with an error naming that row number, and nothing is inserted** (sqlite3 warns and continues by padding/truncating, but for ExecDB's primary use case — seeding data — silently inserting corrupted data was judged more harmful than aborting outright — an intentional difference) |
+| `.dump [PATTERN]` | Dump the schema and data of tables matching `PATTERN` (a SQL LIKE pattern; all tables if omitted), along with any indexes/views/triggers belonging to them, as SQL statements. Literal-value quoting is delegated to SQLite's own `quote()` function |
 
-`.import` / `.dump` は、外部データ連携用途に加えて、**開発・テスト時にシードデータの投入や状態のスナップショット確認に使える**ため採用する。
+`.import`/`.dump` are adopted not only for external data interchange but also because they're **useful during development/testing for seeding data and for checking a snapshot of the current state**.
 
-### ExecDB独自で追加するコマンド
+### Commands ExecDB adds on its own
 
-| コマンド | 役割 |
+| Command | Role |
 | :--- | :--- |
-| `.snapshot [FILENAME] [--timestamp]` | スナップショット保存（§4, §9参照）。`--timestamp`指定時はファイル名にタイムスタンプを付与 |
-| `.overwrite` | 自身の実行ファイルを最新データで上書きし、成功したらREPLを終了する（§4, §7参照） |
-| `.load <取り込むファイル名>` | 別のExecDBファイルからデータのみを取り込み、メモリ上のDB状態を置き換える（ファイルは生成しない。§4参照） |
+| `.snapshot [FILENAME] [--timestamp]` | Save a snapshot (see §4, §9). With `--timestamp`, a timestamp is appended to the filename |
+| `.overwrite` | Overwrite this executable's own file with the latest data, and exit the REPL on success (see §4, §7) |
+| `.load <FILENAME>` | Pull in only the data from another ExecDB file, replacing the in-memory DB state (produces no file. See §4) |
 
-### 採用しないコマンド
+### Commands not adopted
 
-ExecDBは常に単一のインメモリDBのみを扱うシンプルな構成のため、以下のSQLite由来のコマンドは採用しない。
+Since ExecDB always deals with a single, simple in-memory DB, the following SQLite-derived commands are not adopted.
 
-* `.open` / `.databases`（複数DB切り替えの概念が無いため）
-* `.backup` / `.restore`（ExecDB独自の `.snapshot` 方式と役割が重複するため）
-* `.session`（変更履歴セッション機能。過剰な機能のため対象外）
-
----
-
-## 4. 保存・永続化仕様 (Snapshot Mechanism)
-
-データ保持は**「新しい実行ファイル（別名）の生成」**によって行われます。
-
-* **生成タイミング:**
-  * **`.snapshot` コマンドによる明示保存のみ:** 対話コンソール等から手動指示があった場合にのみスナップショットを生成する。
-  * **プロセス停止時の自動保存は行わない:** SIGTERMや、Ctrl+C（SIGINT）が実際にプロセスを終了させた場合（対話モードでのCtrl+Cの詳しい挙動は§10参照。常に即終了するわけではない）、メモリ上のデータは保存されず消える。ExecDBはメモリDBとしての揮発性を前提とし、永続化はユーザーの明示的な操作（`.snapshot`）に一本化することで、停止処理中の書き込み中断による破損リスクや、不要なスナップショットの自動増殖を避ける。
-* **ファイル命名規則:**
-  * デフォルトでは日時タイムスタンプを付与した実行ファイルを自動生成（例: `execdb_20260831_143000`）。
-  * コマンドライン引数や対話コンソールからの指定により、任意のファイル名での出力や既存ファイルへの上書き更新にも対応。
-* **スナップショットファイルの管理:** `.snapshot` のたびにエンジン本体＋データのフルコピーが新規生成されるため、実行のたびにファイル数・容量が増加していく。古いスナップショットの整理（削除）は仕様の対象外とし、運用側（ユーザー）の判断に委ねる。
-
-### 自己上書き（`.overwrite`）という例外
-
-`.overwrite` は、`.snapshot` と同じくユーザーの明示操作による保存だが、**保存と同時にプロセスを終了する**点のみが異なる。上記「プロセス停止時の自動保存は行わない」という原則から唯一逸脱する例外操作であり、学習用途・軽量CLIツールとして「編集してそのまま閉じる」という直感的なワークフローを提供するために意図的に許容する。書き込み方式（実行中ファイルへの上書き回避手順）は§7を参照。
-
-### 他ファイルからのデータ取り込み（`.load`）
-
-`.load <取り込むファイル名>` は、**別のExecDBファイルに埋め込まれたデータのみ**を取り込み、**今動いているプロセスのメモリ上のDB状態をそのデータで置き換える**コマンドである。ファイルの生成は行わない（メモリ上の状態を変更するだけ）。主なユースケースは、異なるOS/アーキテクチャ向けにビルドされたExecDBファイル間でのデータ移植（例: Linux上で作成したデータを、Windows用の空バイナリへ取り込んでから配布する）。
-
-* **動作:** `<取り込むファイル名>` からデータブロブ（§7参照）のみを読み出し、SQLiteエンジンへ取り込むことで（内部実装は§7参照）、今動いているプロセスのメモリ上のDB状態を置き換える。今動いているプロセスが元々持っていたデータは**完全に置き換わる**（マージはしない）。
-* **ファイルへの反映:** `.load` 自体はファイルを生成しない。取り込んだ状態をファイルとして保存したい場合は、続けて `.snapshot` （別名保存）または `.overwrite` （自己上書き）を実行する。異なるOS向けバイナリへデータを移植する典型的な流れは次の通り: 対象OS向けの空バイナリを起動 → `.load <取り込むファイル名>` でデータをメモリへ取り込む → `.overwrite` でそのバイナリ自身にデータを書き込む。
-* **エンジン部分は変更されない:** `.load` は取り込み元ファイルのエンジン部分を一切参照しない。常に今動いているプロセス自身のエンジンで、データのみを読み込む。異なるOS向けバイナリのエンジン部分を直接取り込むことはできない。
-* **既存セッションへの影響:** `.load`はメモリ上のDBを、生きているデータベースへの上書き（§7参照）という形で置き換えるため、その時点で既に開いている他のセッション（REPL自身や外部I/Fの別接続、`engine.Session`）は接続自体が失われることなく維持され、以降に発行する文からは置き換え後のデータをそのまま参照できる。ただし`.load`実行中に他のセッションが未コミットの書き込みトランザクションを実行中だった場合は、SQLite自身の排他制御（本章「同時実行制御」）に従い、`.load`側が待機または失敗しうる。
-* **データを持たないファイルへの`.load`:** 取り込み元ファイルにExecDBのデータブロブが存在しない（フッターの`Magic`が無い、またはデータ長が0の）場合はエラーとなり、今動いているプロセスのメモリ上の状態は変更されない。
-* **バージョン不一致の扱い:** 取り込み元ファイルのフッター（`Version`フィールド、§7参照。データブロブのフォーマットバージョンであり、ExecDBというソフトウェア自体のバージョン——例えばGitタグ——とは別の値）が、今動いているプロセスが書き出すフッターの`Version`と異なる場合、警告を表示した上で処理を続行する（拒否はしない）。この警告表示は`cmd/execdb`側（呼び出し側）の責務であり、`engine`パッケージ自体はログ出力を行わない（§6の責務分担、ライブラリはstderrに書かない）。`engine`は`Inspect(path)`でフッター情報のみを取得するAPIを提供するので、`cmd/execdb`は`.load`実行前にこれを呼び、バージョン不一致を検出したら自分でメッセージを出す。
-* **§4の原則との関係:** `.load` も `.snapshot`/`.overwrite` と同様、ユーザーの明示操作によってのみ実行される。自動的に他ファイルのデータを読み込む機構は存在しない。`.load` 自体はメモリ状態を変更するのみで、ファイルへの永続化は伴わない点に注意する（保存には別途 `.snapshot`/`.overwrite` が必要）。
+* `.open` / `.databases` (no concept of switching between multiple DBs)
+* `.backup` / `.restore` (role overlaps with ExecDB's own `.snapshot` mechanism)
+* `.session` (change-tracking session feature; excluded as excessive for this scope)
 
 ---
 
-## 5. 主なユースケース (Use Cases)
+## 4. Persistence specification (Snapshot Mechanism)
 
-1. **CI/CD・E2Eテストの爆速化 (Instant Test DB)**
-   * テーブル構築・シードデータ投入済みのバイナリを1個置くだけで、1秒未満でメモリ上へテスト環境が立ち上がり、後処理も不要。
-2. **「データ状態付き」でのバグ再現・チーム共有 (Executable Snapshots)**
-   * 不具合が起きたデータ状態を `.snapshot bug_123` でバイナリ化して共有。受け取った側は実行するだけで全く同じDB環境を即座に再現。
-   * 共有先が異なるOSを使っている場合は、そのOS向けの空バイナリを起動し、`.load` でデータをメモリへ取り込んだ上で `.overwrite` を実行することで、同じデータをそのOS向けの実行ファイルとして作り直せる（§4参照）。
-3. **脱・環境構築のモックAPI / デモ環境 (Zero-Config Mock Server)**
-   * 対話コンソールでデータを作り、そのまま外部I/F（PostgreSQL互換プロトコル）として公開。既存のDBクライアントツールやORMからそのまま接続でき、フロントエンド開発やクライアントデモに最適。
-4. **エッジ・CLIツールのポータブルな状態管理 (Portable Data Capsules)**
-   * 外部DBに依存せず、実行ファイル単体で高速処理とファイル単位のスナップショット保存を実現。
-5. **環境構築ゼロのSQL学習・ハンズオン (Zero-Setup SQL Sandbox)**
-   * インストールや認証設定なしで、バイナリを叩くだけで即座にフル機能のSQL（View/Index/Trigger/Transaction）を学習・実験。
-   * Windows / macOS / Linux 問わず、実行ファイルをダブルクリック（またはターミナルから起動）するだけでREPLが立ち上がるため、WSL2等の追加セットアップを必要とせず初学者でも即座に試せる。
+Data is retained by **"generating a new executable file (under a different name)."**
+
+* **When it happens:**
+  * **Only on an explicit `.snapshot` command:** a snapshot is generated only when manually instructed, e.g. from the interactive console.
+  * **No auto-save on process shutdown:** if a `SIGTERM`, or a Ctrl+C (`SIGINT`) that actually terminates the process (see §10 for the detailed interactive-mode Ctrl+C behavior — it does not always exit immediately), arrives, the in-memory data is not saved and is simply lost. ExecDB assumes the volatility of an in-memory DB as a given, and consolidates persistence into a single, explicit user action (`.snapshot`) to avoid the risk of corruption from a write interrupted mid-shutdown, and to avoid unwanted proliferation of automatic snapshots.
+* **Filename convention:**
+  * By default, an executable with a date/time timestamp appended is auto-generated (e.g. `execdb_20260831_143000`).
+  * Command-line arguments or interactive-console instructions can also specify an arbitrary filename, or overwrite an existing file.
+* **Managing snapshot files:** since each `.snapshot` freshly generates a full copy of the engine plus data, the number of files and total size grow with every run. Cleaning up (deleting) old snapshots is out of scope for the spec and left to operational (user) judgment.
+
+### The exception of self-overwrite (`.overwrite`)
+
+`.overwrite` is, like `.snapshot`, a save triggered by an explicit user action, but it differs in that **it terminates the process at the same time it saves**. It is the sole deliberate exception to the "no auto-save on process shutdown" principle above, intentionally permitted to provide an intuitive "edit and just close" workflow for learning use cases and lightweight CLI tools. See §7 for the write mechanism (the steps that avoid overwriting the file currently being executed).
+
+### Pulling data in from another file (`.load`)
+
+`.load <FILENAME>` is a command that pulls in **only the data embedded in another ExecDB file** and **replaces the currently running process's in-memory DB state with it**. It produces no file (it only changes in-memory state). Its main use case is porting data between ExecDB files built for different OS/architectures (e.g. taking data created on Linux and pulling it into an empty Windows binary before distributing it).
+
+* **Behavior:** it reads only the data blob (see §7) out of `<FILENAME>` and pulls it into the SQLite engine (see §7 for the internal implementation), replacing the currently running process's in-memory DB state. Whatever data the running process originally had is **completely replaced** (not merged).
+* **Effect on files:** `.load` itself produces no file. To persist the pulled-in state as a file, follow it with `.snapshot` (save under a different name) or `.overwrite` (self-overwrite). The typical flow for porting data to a binary for a different OS is: launch the empty binary for the target OS → pull the data into memory with `.load <FILENAME>` → write it into that binary itself with `.overwrite`.
+* **The engine itself is unchanged:** `.load` never references the engine portion of the source file at all. It always reads only the data, using the currently running process's own engine. It is not possible to directly pull in the engine portion of a binary built for a different OS.
+* **Effect on existing sessions:** since `.load` replaces the in-memory DB as an overwrite of the live database (see §7), any other session already open at that point (the REPL itself, another external-I/F connection, an `engine.Session`) keeps its connection intact rather than losing it, and any statement issued afterward sees the replaced data as-is. However, if another session has an uncommitted write transaction in flight while `.load` runs, `.load` may block or fail, per SQLite's own exclusion control (see "Concurrency control" in this chapter).
+* **`.load`ing a file with no data:** if the source file has no ExecDB data blob (the footer's `Magic` is missing, or the data length is 0), it's an error, and the currently running process's in-memory state is left unchanged.
+* **Handling a version mismatch:** if the source file's footer (`Version` field, see §7 — the data-blob format version, a value distinct from the ExecDB software's own version, e.g. a Git tag) differs from the `Version` the currently running process would write in its own footer, processing continues after displaying a warning (it is not rejected). Displaying this warning is the responsibility of `cmd/execdb` (the caller) — the `engine` package itself never logs anything (per the division of responsibility in §6: the library never writes to stderr). `engine` provides an `Inspect(path)` API that reads only the footer information, so `cmd/execdb` calls it before running `.load` and prints its own message if it detects a version mismatch.
+* **Relationship to the §4 principle:** like `.snapshot`/`.overwrite`, `.load` too is only ever run by an explicit user action. There is no mechanism that automatically reads data from another file. Note that `.load` itself only changes in-memory state and does not persist to a file (a separate `.snapshot`/`.overwrite` is required to save it).
 
 ---
 
-## 6. ライブラリアーキテクチャ
+## 5. Main use cases
 
-ExecDBは、**インメモリSQLエンジンのライブラリ（`engine`パッケージ）**を核とし、現行のスタンドアロン実行ファイル（REPL＋外部I/F＋バイナリ内蔵の単一バイナリRDBMS）は、その`engine`を用いて構築された「1つのリファレンス実装」として位置づける。
+1. **Blazing-fast CI/CD & E2E testing (Instant Test DB)**
+   * Just drop in a single binary with its tables already built and seed data already loaded — a test environment spins up in memory in under a second, with no cleanup needed afterward.
+2. **Sharing a bug repro "with its data state attached," across a team (Executable Snapshots)**
+   * Turn the data state where a bug occurred into a binary with `.snapshot bug_123` and share it. Whoever receives it just runs it to instantly reproduce the exact same DB environment.
+   * If the recipient is on a different OS, launch the empty binary for that OS, pull the data into memory with `.load`, then run `.overwrite` to rebuild the same data as an executable for that OS (see §4).
+3. **A mock API / demo environment with zero environment setup (Zero-Config Mock Server)**
+   * Build up data in the interactive console, then expose it as-is over the external I/F (PostgreSQL-compatible protocol). Existing DB client tools and ORMs can connect directly — ideal for frontend development or client demos.
+4. **Portable state management for edge/CLI tools (Portable Data Capsules)**
+   * Achieve fast processing and file-level snapshot saving with a single executable, no dependency on an external DB.
+5. **Zero-setup SQL learning/hands-on sessions (Zero-Setup SQL Sandbox)**
+   * With no install or authentication setup, just run the binary to instantly learn/experiment with full-featured SQL (views/indexes/triggers/transactions).
+   * Since double-clicking the executable (or launching it from a terminal) starts the REPL on Windows, macOS, or Linux alike, even beginners can try it immediately with no extra setup like WSL2.
 
-### レイヤー構成
+---
+
+## 6. Library architecture
+
+ExecDB is built around an **in-memory SQL engine library (the `engine` package)** as its core, with the current standalone executable (a single-binary RDBMS combining REPL + external I/F + an embedded binary) positioned as "one reference implementation" built using that `engine`.
+
+### Layer structure
 
 ```
 execdb/
-├── engine/              ← 【ライブラリ本体】インメモリSQLエンジン
-│                            （modernc.org/sqlite ラッパー、Go関数呼び出しのAPI、
-│                             永続化インターフェース、自身の実行ファイルを
-│                             上書きする Overwrite を提供）
+├── engine/              ← [Library core] the in-memory SQL engine
+│                            (a modernc.org/sqlite wrapper, a Go-function-call
+│                             API, a persistence interface, and an Overwrite
+│                             that overwrites its own executable)
 │
-└── cmd/execdb/          ← 【アプリ】engineを利用した単一バイナリRDBMSの実装
-                             （REPL、外部I/F(PostgreSQL互換ワイヤープロトコル)、
-                             DDL/DML/TCLのアクセス制御（§2）を担う）
+└── cmd/execdb/          ← [App] the single-binary RDBMS built on engine
+                             (REPL, external I/F (PostgreSQL-compatible wire
+                             protocol), and DDL/DML/TCL access control (§2))
 ```
 
-具体的なファイル構成（`engine.go`, `persist.go`, `main.go`, `repl.go`,
-`pgwire.go` 等）は実装時に決める（詳細は `.claude/rules/directory-structure.md`
-参照）。ここでは2つのディレクトリの役割分担のみを示す。
+The concrete file layout (`engine.go`, `persist.go`, `main.go`, `repl.go`, `pgwire.go`, etc.) is decided during implementation (see `.claude/rules/directory-structure.md` for details). This section only shows the division of responsibility between the two directories.
 
-### 責務分担
+### Division of responsibility
 
-| | `engine`（ライブラリ） | `cmd/execdb`（アプリ） |
+| | `engine` (library) | `cmd/execdb` (app) |
 | :--- | :--- | :--- |
-| SQL実行 | Go関数呼び出し（単発実行の`db.Query()`/`db.Exec()`等、および独立したクライアント単位で`BEGIN`/`COMMIT`をまたぐ`db.Session(ctx)`）を提供 | `engine`のAPIを呼び出すだけ |
-| ネットワークI/F | **持たない**（`net`・`net/http`への直接依存なし） | PostgreSQL互換ワイヤープロトコルを実装 |
-| アクセス制御（DDL/DML/TCL） | 制限なし（呼び出し元コードは信頼済みとみなす） | REPL/外部I/Fの経路ごとに制御（§2） |
-| 永続化 | 汎用的な読み書き（任意のファイル、`io.Writer`/`io.Reader`）＋ 自身の実行ファイルへの上書き（`Overwrite`） | `.snapshot` / `.overwrite` / `.load` コマンドから呼び出すだけ（§4） |
-| 用途 | 他のGoアプリに組み込む内蔵DB層（sqliteファイルの代替） | CI/CDテスト、モックAPI、ポータブル配布 |
+| SQL execution | Provides Go function calls (one-shot execution via `db.Query()`/`db.Exec()`, etc., and `db.Session(ctx)` for a single independent client spanning `BEGIN`/`COMMIT`) | Just calls `engine`'s API |
+| Network I/F | **Has none** (no direct dependency on `net`/`net/http`) | Implements the PostgreSQL-compatible wire protocol |
+| Access control (DDL/DML/TCL) | Unrestricted (caller code is assumed trusted) | Controlled per access path — REPL vs. external I/F (§2) |
+| Persistence | Generic read/write (any file, `io.Writer`/`io.Reader`) + overwriting its own executable (`Overwrite`) | Just calls it from `.snapshot`/`.overwrite`/`.load` commands (§4) |
+| Purpose | An embedded DB layer for other Go apps to build in (a substitute for a sqlite file) | CI/CD testing, mock APIs, portable distribution |
 
-### 設計原則: ネットワークI/Fを持たないことによる安全性
+### Design principle: safety from having no network I/F
 
-`engine`パッケージは、Goの関数呼び出しでのみアクセスできる。ネットワーク越しの入出力機能を実装しないため、他のGoアプリへ組み込んだ場合、外部からの通信経路は**そのアプリ自身が明示的に作らない限り一切存在しない**。これは「弾くロジックを書いて防御する」のではなく、「弾く手段が構造的に存在しない」ことによる安全性であり、`engine`自身が`net`・`net/http`をimportしないことはコードレベルで検証可能である（この設計は1章の「Zero-Auth」思想と一貫する）。ただし推移的依存には`net`パッケージが含まれる（内部SQLエンジン`modernc.org/sqlite`が使う`modernc.org/libc`経由）。これはSQLiteドライバ実装自体の都合であり、`engine`自身がネットワークI/Oを行うコードを持つことを意味しない——検証すべきは「直接importの有無」および「`net/http`が推移的にも現れないこと」である。
+The `engine` package can only be accessed via Go function calls. Since it implements no network-based I/O, when embedded in another Go app, there is **no external communication path at all unless that app itself explicitly creates one**. This is not "safety through logic that rejects things," but "safety through the structural absence of any means to be reached" — and the fact that `engine` itself never imports `net`/`net/http` is verifiable at the code level (this design is consistent with the "Zero-Auth" philosophy in chapter 1). Note, however, that the `net` package does appear as a transitive dependency (via `modernc.org/libc`, which the internal SQL engine `modernc.org/sqlite` uses). That's an artifact of the SQLite driver implementation itself, not a sign that `engine` has code that performs network I/O — what should be verified is "whether there's a direct import" and "that `net/http` never appears, even transitively."
 
-### 自己上書き（`Overwrite`）
+### Self-overwrite (`Overwrite`)
 
-`engine`パッケージは、自身を組み込んだホストアプリの実行ファイルを、最新のDB状態で上書きするための関数を提供する。
+The `engine` package provides a function for overwriting the executable of the host app that embeds it, with the latest DB state.
 
 ```go
-// engine パッケージ
-// Overwrite は、呼び出し元プロセス自身の実行ファイル（os.Executable()で得られるパス）を、
-// 現在のDB状態を埋め込んだ内容で上書きする。書き込み方式は§7参照。
-// 成功時、ファイルの中身は差し替わるが、呼び出し元プロセス自体は終了しない
-// （終了させるかどうかは呼び出し元の判断に委ねる）。
+// engine package
+// Overwrite overwrites the caller process's own executable (the path
+// obtained via os.Executable()) with content that embeds the current DB
+// state. See §7 for the write mechanism.
+// On success the file's contents are replaced, but the caller process
+// itself does not exit (whether to exit is left to the caller's judgment).
 func (db *DB) Overwrite() error
 ```
 
-`engine`は「自分のどこまでがエンジンでどこからがデータか」をホストアプリに意識させない。ホストアプリ全体（`engine`を組み込んだアプリ本体一式）がそのまま「エンジン部分」として扱われ、その後ろにデータとフッターが付与される。ExecDB本体の `.overwrite` コマンド（§3）も、内部でこの `Overwrite` を呼んでいるだけの薄いラッパーである。
+`engine` never makes the host app aware of "where the engine ends and the data begins." The entire host app (the whole app binary that embeds `engine`) is treated as-is as "the engine portion," with data and a footer appended after it. ExecDB's own `.overwrite` command (§3) is itself just a thin wrapper that calls this `Overwrite` internally.
 
-**利用イメージ（ホストアプリ側）:**
+**Example usage (host app side):**
 ```go
 if err := db.Overwrite(); err != nil {
     log.Fatal(err)
 }
-os.Exit(0) // 「編集して閉じたら、次回起動時に続きから」という体験を実現
+os.Exit(0) // realizes an "edit, close, and pick up where you left off next time" experience
 ```
 
-**利用上の注意:**
-* ホストアプリが `/usr/bin/` や `C:\Program Files\` のような書き込み権限が必要なディレクトリに設置されている場合、`Overwrite` は権限エラーで失敗する。
-* ホストアプリ自身が別の自己更新の仕組み（Squirrel/Sparkle等）を持つ場合、実行ファイル差し替えのタイミングが競合しうるため注意する。
-* このAPIはGoアプリへの組み込みを対象範囲とする。他言語アプリへ同じロジックを移植することは可能だが、本仕様のスコープ外とする。
+**Caveats when using it:**
+* If the host app is installed in a directory that requires elevated write permissions, like `/usr/bin/` or `C:\Program Files\`, `Overwrite` fails with a permission error.
+* If the host app has its own separate self-update mechanism (Squirrel/Sparkle, etc.), be careful — the timing of the executable replacement could conflict.
+* This API's scope is embedding into Go apps. Porting the same logic to an app in another language is possible, but is out of scope for this spec.
 
-### `OpenSelf` — 自身の実行ファイルからのロード
+### `OpenSelf` — loading from one's own executable
 
-`cmd/execdb`本体のように、「自分自身の実行ファイルに埋め込まれたデータを読み込む」
-ホストアプリ向けに、`engine`は専用の入口を提供する。内部的には
-`os.Executable()`で自身のパスを取得した上で`Open`を呼ぶだけの薄いラッパーだが、
-起動時に前回の`Overwrite`が残した`.execdb_old`退避ファイル（§7参照）の
-ベストエフォート削除も合わせて行う。
+For host apps like `cmd/execdb` itself that need to "load the data embedded in their own executable," `engine` provides a dedicated entry point. Internally it's a thin wrapper that just gets its own path via `os.Executable()` and calls `Open`, but it also does a best-effort deletion, at startup, of the `.execdb_old` staging file (see §7) that a previous `Overwrite` may have left behind.
 
 ```go
-// engine パッケージ
-// OpenSelf は、実行中のプロセス自身の実行ファイル（os.Executable()）に
-// 埋め込まれたデータを読み込む。
+// engine package
+// OpenSelf loads the data embedded in the currently running process's own
+// executable (os.Executable()).
 func OpenSelf() (*DB, error)
 ```
 
-### `Session` — 独立したクライアント単位の専有コネクション
+### `Session` — a dedicated connection per independent client
 
-`db.Query()`/`db.Exec()`はコネクションプールから借りた接続を1文だけ使って
-返す単発実行であり、これを使って`BEGIN`しても、後続の`COMMIT`が同じ接続に
-届く保証はない（2章「同時実行制御」参照）。REPL・外部I/Fのように「1つの
-独立したクライアントが、同じ接続上で複数の文にまたがるトランザクションを
-張る」用途には、`Session`を使う。
+`db.Query()`/`db.Exec()` are one-shot calls that borrow a connection from the pool for a single statement and return it; even if you `BEGIN` through it, there's no guarantee a later `COMMIT` reaches the same connection (see "Concurrency control" in chapter 2). For a use case like the REPL or the external I/F — "one independent client spans a transaction across multiple statements on the same connection" — use `Session`.
 
 ```go
-// engine パッケージ
-// Session は、db が保持するインメモリDBに対する専有コネクションを返す。
-// 独立したクライアント1つ分（外部I/Fの1接続、REPLのプロセス自体、等）に
-// つき1つ取得することを想定する。BEGIN/COMMIT/ROLLBACKはこのコネクション上で
-// 通常のSQL文として実行すればよく、Go側に専用のトランザクションAPIは無い。
+// engine package
+// Session returns a dedicated connection to the in-memory DB that db
+// holds. It's meant to be obtained once per independent client (one
+// external-I/F connection, the REPL process itself, etc.). BEGIN/COMMIT/
+// ROLLBACK can be run as ordinary SQL statements on this connection —
+// there is no dedicated transaction API on the Go side.
 func (db *DB) Session(ctx context.Context) (*Session, error)
 
 func (s *Session) Exec(query string, args ...any) (sql.Result, error)
 func (s *Session) Query(query string, args ...any) (*sql.Rows, error)
 func (s *Session) QueryRow(query string, args ...any) *sql.Row
-// 上記それぞれの *Context 版、および db.Exec 等自体の *Context 版もある。
+// *Context variants of each of the above exist too, as do *Context
+// variants of db.Exec, etc. themselves.
 
-// 同じ文を繰り返し実行する呼び出し元（cmd/execdbの.importによる
-// CSV一括投入等）向けに、このSessionの専有コネクション上でprepareした
-// *sql.Stmt を返す。
+// For a caller that repeatedly executes the same statement (e.g.
+// cmd/execdb's .import bulk-loading CSV data), returns a *sql.Stmt
+// prepared on this Session's dedicated connection.
 func (s *Session) Prepare(query string) (*sql.Stmt, error)
 func (s *Session) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
 
-// 使い終えたら明示的に Close する（idempotent）。
+// Close explicitly once done with it (idempotent).
 func (s *Session) Close() error
 ```
 
-### ライブラリとしての利用例
+### Example usage as a library
 
 ```go
 import "github.com/amisonnet8/execdb/engine"
 
-// 専用データファイルを開く（sqliteファイルの代替として利用）
+// Open a dedicated data file (used as a substitute for a sqlite file)
 db, err := engine.Open("myapp.execdb")
 
-// 通常のSQL操作（アプリ内部コードは信頼済みのためDDL/DML制限なし）
+// Ordinary SQL operations (no DDL/DML restrictions, since in-app code is
+// assumed trusted)
 db.Exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)")
 db.Query("SELECT * FROM users")
 
-// 永続化（別ファイルへ明示的にスナップショットを書き出す。ファイル名は
-// 呼び出し側が指定する。タイムスタンプ付与等の命名規則はcmd/execdb側の責務）
+// Persistence (explicitly write a snapshot to a separate file; the caller
+// specifies the filename — naming conventions like timestamping are
+// cmd/execdb's responsibility)
 db.Snapshot("myapp_backup.execdb")
 
-// 永続化（自分自身の実行ファイルを上書きする。ここでは常に
-// os.Executable() が対象になり、Open() に渡したパスとは無関係）
+// Persistence (overwrite its own executable; this always targets
+// os.Executable(), regardless of the path passed to Open())
 db.Overwrite()
 
 db.Close()
@@ -275,471 +262,472 @@ db.Close()
 
 ---
 
-## 7. アーキテクチャ・技術選定
+## 7. Architecture and technology choices
 
-| 項目 | 内容 | 備考 |
+| Item | Content | Notes |
 | :--- | :--- | :--- |
-| **開発言語** | **Go (Golang)** | 静的バイナリ生成、クロスコンパイル、マルチプラットフォーム対応。 |
-| **ターゲットOS** | **クロスプラットフォーム対応（Linux / macOS / Windows）** | REPL単体起動・外部I/Fは全OS共通で動作保証。UNIX Domain Socketはローカル接続向けの追加オプション（Windowsでの利用可否は環境依存、Windows 10 Build 17063以降/Server 2019以降が目安）。コンテナ運用（`FROM scratch`等の軽量イメージ）はLinuxを優先する。配布物は各OS/アーキテクチャ向けの空（データなし）バイナリをあらかじめビルドして提供する。 |
-| **内部DBエンジン** | `modernc.org/sqlite`（Pure-Go SQLite トランスパイル版） | CGO不要でクロスコンパイル容易、`database/sql`標準インターフェース準拠。View, Index, Trigger, Transaction を含む完全な SQL 互換性を実績豊富な実装で低コストに担保。 |
-| **外部 I/F** | PostgreSQL互換ワイヤープロトコル（サブセット） | 詳細は§8参照。JDBC/psycopg/node-postgres等の既存ドライバ資産にそのまま乗る。 |
+| **Language** | **Go (Golang)** | Static binary generation, cross-compilation, multi-platform support. |
+| **Target OS** | **Cross-platform (Linux / macOS / Windows)** | Standalone REPL launch and the external I/F are guaranteed to work identically across all OSes. UNIX Domain Socket is an additional option for local connections (availability on Windows is environment-dependent — Windows 10 Build 17063+/Server 2019+ as a rule of thumb). Container operation (lightweight images like `FROM scratch`) prioritizes Linux. Distributed artifacts are prebuilt, empty (no-data) binaries for each OS/architecture. |
+| **Internal DB engine** | `modernc.org/sqlite` (a pure-Go transpiled SQLite) | No CGO required, easy cross-compilation, conforms to the standard `database/sql` interface. Guarantees full SQL compatibility — views, indexes, triggers, transactions included — at low cost, via a proven implementation. |
+| **External I/F** | PostgreSQL-compatible wire protocol (subset) | See §8 for details. Rides directly on existing driver assets like JDBC/psycopg/node-postgres. |
 
-### バイナリ埋め込み方式（固定長フッター）
+### Binary embedding scheme (fixed-length footer)
 
-実行ファイル末尾へのデータ埋め込みは、**固定長フッター（トレーラー）方式**を採用する。
+Embedding data at the end of the executable uses a **fixed-length footer (trailer)** scheme.
 
 ```
-[Goバイナリ本体（エンジン部分）] [データブロブ（DB状態）] [フッター（固定32バイト）]
+[Go binary body (engine portion)] [Data blob (DB state)] [Footer (fixed 32 bytes)]
 ```
 
-| フィールド | サイズ | 内容 |
+| Field | Size | Content |
 | :--- | :--- | :--- |
-| Magic | 8 bytes | 識別子（例: `"EXECDB01"`） |
-| Version | 4 bytes | フォーマットバージョン（**big-endian**符号なし整数） |
-| DataOffset | 8 bytes | データブロブの開始オフセット（先頭からの絶対位置、**big-endian**） |
-| DataLength | 8 bytes | データブロブの長さ（**big-endian**） |
-| Reserved | 4 bytes | 将来拡張用 |
+| Magic | 8 bytes | Identifier (e.g. `"EXECDB01"`) |
+| Version | 4 bytes | Format version (**big-endian** unsigned integer) |
+| DataOffset | 8 bytes | The data blob's start offset (absolute position from the start of the file, **big-endian**) |
+| DataLength | 8 bytes | The data blob's length (**big-endian**) |
+| Reserved | 4 bytes | For future extension |
 
-フッター中のすべての整数フィールドは **big-endian** でエンコードする。
+Every integer field in the footer is encoded **big-endian**.
 
-* **読み込み:** `os.Executable()` で自身のパスを取得し、ファイル末尾から32バイトを `Seek` で読むだけでフッターを特定できる。ELF/Mach-Oのセクションヘッダ解析は不要。
-* **書き込み（`.snapshot`実行時、別名保存）:** 起動時に自身のエンジン部分のオフセット（0〜DataOffset、または末尾フッターが無い場合はファイル全体サイズ）のみをメモリ上に保持しておき、実際のエンジンバイト列は保存直前に読み直す（`modernc.org/sqlite`込みのバイナリは10〜15MB級になるため、バイト列自体を常駐させない）。保存時は「エンジンバイト＋新データ＋新フッター」から新しいスナップショットを生成する。差分計算や再リンクは不要。書き込みは同じディレクトリに作った一時ファイルへ書いてから`rename`するアトミックな方式を採り、読み手が書きかけの不完全なファイルを観測することはない。また、データブロブの取得（後述の`Serialize`）は他セッションが書き込みトランザクションを実行中でないことを保証してから行うため、並行して書き込みが起きていても常に一貫したスナップショットになる。
-* **書き込み（`.overwrite`実行時、自己上書き）:** 同名（自分自身）への直接上書きは、実行中のファイルへの書き込みロックによりOSレベルで拒否される（Linuxの`ETXTBSY`、Windowsの`ERROR_SHARING_VIOLATION`）。これを回避するため、以下の手順を採る（Linux/Windows双方でPoC検証済み）。
-  1. 実行中の自分自身を `<path>` → `<path>.execdb_old` に `rename` で退避する（実行中ファイルの名前変更自体はLinux/Windows双方で許可される）
-  2. 空いた元のパスへ新しい中身（エンジンバイト＋新データ＋新フッター）を新規書き込みする
-  3. 退避ファイルの削除を試みる（Linuxはその場で成功。Windowsは実行中のためロックされ失敗するのが正常であり、次回起動時にベストエフォートで削除する）
+* **Reading:** get its own path via `os.Executable()`, then `Seek` to read the last 32 bytes of the file — that's enough to locate the footer. No ELF/Mach-O section-header parsing needed.
+* **Writing (on `.snapshot`, saving under a different name):** at startup, only the offset range of its own engine portion (0 to DataOffset, or the whole file size if there's no trailing footer) is kept in memory, and the actual engine byte sequence is re-read right before saving (a binary bundling `modernc.org/sqlite` runs 10-15MB-class, so the byte sequence itself is not kept resident). At save time, a new snapshot is generated from "engine bytes + new data + new footer." No diffing or relinking is needed. Writing uses the atomic pattern of writing to a temp file in the same directory and then `rename`ing it, so a reader never observes a partially-written, incomplete file. Also, since acquiring the data blob (`Serialize`, below) is done only after guaranteeing that no other session has a write transaction in flight, the snapshot is always consistent even if writes are happening concurrently.
+* **Writing (on `.overwrite`, self-overwrite):** writing directly over the same file (itself) while it's running is rejected at the OS level by the write lock on the running file (Linux's `ETXTBSY`, Windows' `ERROR_SHARING_VIOLATION`). To work around this, the following steps are taken (proof-of-concept verified on both Linux and Windows).
+  1. `rename` the currently running self from `<path>` to `<path>.execdb_old` to stage it aside (renaming a file that's currently running is allowed on both Linux and Windows)
+  2. write the new content (engine bytes + new data + new footer) fresh, into the now-vacant original path
+  3. attempt to delete the staged file (succeeds immediately on Linux; on Windows it's expected to fail since it's locked while running — deleted on a best-effort basis at the next startup instead)
 
-  手順2の書き込みに失敗した場合は、手順1で退避したファイルを元のパスへベストエフォートで戻す（=完全に失敗する前の状態への復帰を試みる）。また、実行中のプロセスが`go run`によって生成された一時バイナリである場合（プロセス終了と同時にOSがファイル自体を削除するため、上書きしても無意味になる）、`.overwrite`は明示的なエラーで拒否する。
-* **データなしの初回配布バイナリ:** 末尾にマジックバイトが見つからない場合は「エンジンのみ・データ空」として起動する。`go build` した素のバイナリがそのまま実行可能であり、`.snapshot` または `.overwrite` を実行して初めてデータ付きバイナリになる。
-* この方式は自己解凍インストーラやJARファイル（ZIP中央ディレクトリの末尾探索）などで実績のある手法であり、OSローダーの実行にも影響を与えない。
+  If the write in step 2 fails, the file staged aside in step 1 is moved back to the original path on a best-effort basis (i.e. an attempt is made to restore the state from before the failure). Also, if the running process is a temporary binary produced by `go run` (since the OS deletes the file itself the moment the process exits, overwriting it would be pointless), `.overwrite` rejects the operation with an explicit error.
+* **A freshly distributed, data-free binary:** if no magic bytes are found at the end of the file, it starts up as "engine only, empty data." A plain binary straight out of `go build` is directly runnable as-is, and only becomes a binary with data once `.snapshot` or `.overwrite` is run.
+* This scheme is a well-proven technique used by self-extracting installers and JAR files (searching backward from the end for a ZIP central directory), and it has no effect on how the OS loader executes the file.
 
-### データブロブのシリアライズ方式（確定）
+### Data blob serialization scheme (finalized)
 
-「データブロブ」＝インメモリSQLite DBの状態をバイト列化する方法として、**SQLite標準の `Serialize`/`Deserialize` API（`sqlite3_serialize()` / `sqlite3_deserialize()`）を使う方式を採用する**（2026-09-04、フェーズ①Step 1の実測検証済み。フォールバック不要と判断。詳細な検証記録はPLAN.mdのフェーズ①/②の「確定した事実」各節を参照）。自前のシリアライズ形式は編み出さない。
+For turning the "data blob" — the in-memory SQLite DB's state — into a byte sequence, **the scheme adopted is SQLite's own standard `Serialize`/`Deserialize` API (`sqlite3_serialize()` / `sqlite3_deserialize()`)** (finalized 2026-09-04, empirically verified during phase 1 Step 1 — judged not to need a fallback. See the "facts finalized" sections for phases 1/2 in PLAN.md for the detailed verification record). No home-grown serialization format was invented.
 
-* **実際のAPI:** `modernc.org/sqlite`（v1.58.0で確認）が提供するのは
-  `func (c *conn) Serialize() ([]byte, error)` と
-  `func (c *conn) Deserialize(buf []byte) error` であり、**スキーマ名を渡す
-  引数は無い**（常にmainスキーマが対象。当初想定していた `Serialize("main")` /
-  `Deserialize("main", data)` という形ではない）。`conn` 型自体はunexportedだが
-  メソッドはexportedなので、`database/sql` の `*sql.Conn` から
-  `conn.Raw(func(driverConn any) error { ... })` を呼び、`driverConn` を
-  ローカルで定義したinterface（`interface{ Serialize() ([]byte, error) }` 等）に
-  型アサーションすることで到達できる。
-* **書き込み時（`.snapshot` / `.overwrite`）:** 上記の方法で取得した `Serialize()` の
-  戻り値を、そのままフッター方式の「データブロブ」として書き込む。
-* **起動時:** バイナリ末尾から読み込んだデータブロブを、同様の方法で取得した
-  `Deserialize(data)` にそのまま渡すことで、SQLiteが内部的にインメモリDBとして
-  再展開する。`modernc.org/sqlite` は内部で
-  `SQLITE_DESERIALIZE_RESIZEABLE|SQLITE_DESERIALIZE_FREEONCLOSE` を指定して
-  `sqlite3_deserialize()` を呼んでいるため、**復元後のDBは通常のDBと同様に
-  拡張可能**（大量INSERTが可能。復元専用の固定サイズDBにはならないことを実測
-  確認済み）。
-* **接続共有モデル（`memdb` VFS）:** DSNは`file:/<name>?vfs=memdb&_busy_timeout=<N>`
-  （`modernc.org/sqlite`が実装する`memdb` VFS）を採用する。名前が`/`で始まる
-  DSNは、同一プロセス内であれば複数のコネクションが同じインメモリストアを
-  共有する。`memdb`のロックはファイルベースDBと同種のSHARED/RESERVED/
-  EXCLUSIVE機構で実装されているため、コネクション間のロック衝突時は
-  `busy_timeout`（SQLite標準のbusy-handler機構）が正しく機能し、有界に
-  待ってから諦める（2章「同時実行制御」参照）。当初検討していた
-  `file:<name>?mode=memory&cache=shared`（shared-cache）は、ロック衝突時に
-  `SQLITE_LOCKED_SHAREDCACHE`という別系統のエラーとなり、`busy_timeout`が
-  効かないうえ、待機自体もアプリケーション側から`context`でキャンセルできず
-  無期限にハングしうることが実測で判明したため不採用とした。他の全接続が
-  閉じてもストアが解放されないよう、`Close()`まで保持し続ける「keeper接続」
-  を1つ持つ点は変わらない（keeperはストアを生かすためだけに存在し、SQL文の
-  実行そのものには使わない）。
-* **`Deserialize`と複数コネクションの関係:** `Deserialize`はスキーマを
-  匿名（無名）の`memdb`ストアとして内部的に開き直す実装になっており、
-  呼び出したコネクション自身にしか結果が反映されない——同一DSNで後から
-  開いた別コネクションからも見えない。そのため`Open`/`OpenSelf`/`Load`は、
-  まず使い捨てのコネクションへ`Deserialize`した上で、SQLite標準の
-  オンラインBackup API（`sqlite3_backup_*`系。`modernc.org/sqlite`では
-  `NewBackup`/`NewRestore`として公開）でその内容を「生きている」DB
-  （keeper接続が保持するストア）へコピーする、という2段階の手順を踏む。
-  Backup APIによるコピーはSQLite本来のB-tree/pager経由の複製であり、
-  `Deserialize`と異なり、コピー先の全コネクション（Backup実行前から
-  開いていたものも含む）から結果が見える。`Load`がこの仕組みで「生きている」
-  DBへその場で上書きする形を取ることにより、`.load`実行前から開いていた
-  他のセッション（4章参照）も接続を失わずに新しいデータを参照できる。
-* **既知の制約:** SQLite本体の`Serialize`/`Deserialize`自体は非連続な
-  バイト列を扱えず、理論上はデータベースサイズが2GB未満に制限される
-  （SQLiteが一度に2GBを超えるメモリを確保しないため）。ただし採用した
-  `memdb` VFSにはそれとは別に`SQLITE_MEMDB_DEFAULT_MAXSIZE`（1GiB）という
-  デフォルト上限があり、実測では約960MiB付近で`SQLITE_FULL`となることを
-  確認済み——実効的な上限はこちらの約1GiBである。ExecDBの主要ユースケース
-  （CI/CDテストDB、モックAPI、学習用サンドボックス等）では通常問題になら
-  ない想定だが、大容量データを扱う用途では制約となりうる。
+* **The actual API:** what `modernc.org/sqlite` (confirmed at v1.58.0) provides is
+  `func (c *conn) Serialize() ([]byte, error)` and
+  `func (c *conn) Deserialize(buf []byte) error` — **there is no argument for
+  passing a schema name** (it always targets the main schema; this is not the
+  originally assumed shape of `Serialize("main")` /
+  `Deserialize("main", data)`). The `conn` type itself is unexported, but its
+  methods are exported, so it can be reached from `database/sql`'s `*sql.Conn`
+  by calling `conn.Raw(func(driverConn any) error { ... })` and type-asserting
+  `driverConn` against a locally defined interface (e.g.
+  `interface{ Serialize() ([]byte, error) }`).
+* **On write (`.snapshot` / `.overwrite`):** the return value of `Serialize()`,
+  obtained via the method above, is written as-is as the "data blob" in the
+  footer scheme.
+* **On startup:** the data blob read from the end of the binary is passed
+  as-is to `Deserialize(data)`, obtained the same way, causing SQLite to
+  internally re-expand it as an in-memory DB. Because `modernc.org/sqlite`
+  internally calls `sqlite3_deserialize()` specifying
+  `SQLITE_DESERIALIZE_RESIZEABLE|SQLITE_DESERIALIZE_FREEONCLOSE`, **the
+  restored DB is expandable just like a normal DB** (large numbers of INSERTs
+  are possible — empirically confirmed it does not become a fixed-size,
+  restore-only DB).
+* **Connection-sharing model (`memdb` VFS):** the DSN adopted is
+  `file:/<name>?vfs=memdb&_busy_timeout=<N>` (the `memdb` VFS implemented by
+  `modernc.org/sqlite`). A DSN whose name starts with `/` is shared by
+  multiple connections within the same process, against the same in-memory
+  store. Because `memdb`'s locking is implemented with the same kind of
+  SHARED/RESERVED/EXCLUSIVE mechanism as a file-based DB, `busy_timeout`
+  (SQLite's standard busy-handler mechanism) correctly kicks in on a lock
+  conflict between connections, waiting a bounded amount of time before
+  giving up (see "Concurrency control" in chapter 2). The originally
+  considered `file:<name>?mode=memory&cache=shared` (shared-cache) was
+  rejected, since empirical testing showed that a lock conflict produces a
+  separate class of error (`SQLITE_LOCKED_SHAREDCACHE`) for which
+  `busy_timeout` doesn't apply, and the wait itself can't even be cancelled
+  from the application side via `context` — it can hang indefinitely. There's
+  still one "keeper connection" held open until `Close()`, so the store isn't
+  released even if every other connection closes (the keeper exists solely to
+  keep the store alive — it's never used to execute SQL statements itself).
+* **The relationship between `Deserialize` and multiple connections:**
+  `Deserialize` is implemented in a way that internally reopens the schema as
+  an anonymous (unnamed) `memdb` store — the result is only reflected on the
+  connection that called it, and is not visible even from another connection
+  opened later with the same DSN. Because of this, `Open`/`OpenSelf`/`Load`
+  take a two-step approach: first `Deserialize` into a throwaway connection,
+  then copy that content into the "live" DB (the store the keeper connection
+  holds) using SQLite's standard online Backup API
+  (the `sqlite3_backup_*` family — exposed by `modernc.org/sqlite` as
+  `NewBackup`/`NewRestore`). Copying via the Backup API is SQLite's genuine
+  B-tree/pager-level replication, and unlike `Deserialize`, the result is
+  visible from every connection on the destination side (including ones
+  already open before the Backup ran). Because `Load` takes this approach —
+  overwriting the "live" DB in place — other sessions already open before
+  `.load` runs (chapter 4) can see the new data without losing their
+  connection.
+* **Known limitation:** SQLite's own `Serialize`/`Deserialize` cannot handle
+  non-contiguous byte sequences, which in theory caps the database size at
+  under 2GB (since SQLite never allocates more than 2GB of memory at once).
+  However, the `memdb` VFS that was adopted has a separate default cap of its
+  own, `SQLITE_MEMDB_DEFAULT_MAXSIZE` (1GiB), and empirical testing confirmed
+  it hits `SQLITE_FULL` around ~960MiB — this ~1GiB figure is the effective
+  limit. This shouldn't normally be an issue for ExecDB's primary use cases
+  (CI/CD test DBs, mock APIs, learning sandboxes, etc.), but it could be a
+  constraint for use cases handling large volumes of data.
 
 ---
 
-## 8. 外部 I/F プロトコル仕様（PostgreSQL互換ワイヤープロトコル）
+## 8. External I/F protocol specification (PostgreSQL-compatible wire protocol)
 
-外部 I/F は、独自プロトコルを新規に定義するのではなく、**PostgreSQLワイヤープロトコル(v3)のサブセット**を実装する方式を採用する。これにより、JDBC(pgJDBC)、Python(psycopg)、Node.js(node-postgres)、.NET(Npgsql)、Go(pgx)、ODBC(psqlODBC)、PHP(PDO_PGSQL)、Ruby(pg gem)、Rust(postgres/tokio-postgres)など、各言語・各インターフェースで既に確立されたPostgreSQL用ドライバ資産が、ExecDB側の追加対応なしにそのまま接続できる。CockroachDB・YugabyteDBなど新興分散DBが採用しているのと同じ戦略である。**pgx・pgJDBC・psycopg・node-postgres・Npgsql・psqlODBC・PDO_PGSQL・pg gem・Rustの9つすべてで、接続・SELECT/DML/トランザクション・DDL拒否が動くことを実機で確認済み（フェーズ④Step 5・7、フェーズ④完了後の追加検証、`tests/pgclient`・`tests/drivers/`）。ただしNpgsqlのみ、各ドライバ自身の「デフォルト接続設定のまま」という前提が崩れる——接続文字列に`Server Compatibility Mode=NoTypeLoading`の指定が必要（詳細は下記）。他の8つはこの種の指定なしに接続できる。psqlODBCはクライアント側の指定は不要だが、`SQLTables`/`SQLColumns`（テーブル一覧・列一覧を返すODBC標準API、Excel/Power BI/Access等が使う）まで動かすため、ExecDBサーバー側にPostgresシステムカタログ（`pg_type`/`pg_class`/`pg_namespace`/`pg_attribute`等）互換のビュー・関数を追加している（`cmd/execdb/pgcatalog.go`、詳細は`.claude/rules/pgwire.md`）。Rustの`postgres`/`tokio-postgres`クレートは独自にワイヤープロトコルを再実装しており、検証の過程でExecDB本体の潜在バグ（`Describe`と`Execute`で列のOIDが食い違う）を発見・修正した（他ドライバにも波及する修正、詳細は`.claude/rules/pgwire.md`）。**
+Rather than defining a brand-new protocol, the external I/F implements a **subset of the PostgreSQL wire protocol (v3)**. This lets already-established PostgreSQL driver assets across languages/interfaces — JDBC (pgJDBC), Python (psycopg), Node.js (node-postgres), .NET (Npgsql), Go (pgx), ODBC (psqlODBC), PHP (PDO_PGSQL), Ruby (the `pg` gem), Rust (postgres/tokio-postgres) — connect as-is with no ExecDB-specific work. This is the same strategy adopted by emerging distributed databases like CockroachDB and YugabyteDB. **All nine of pgx, pgJDBC, psycopg, node-postgres, Npgsql, psqlODBC, PDO_PGSQL, the `pg` gem, and Rust have been empirically confirmed to connect and run SELECT/DML/transactions and DDL rejection (phase 4 Steps 5 and 7, further verification added after phase 4 completion, `tests/pgclient`/`tests/drivers/`). Npgsql is the sole exception where each driver's own "default connection settings" assumption breaks down — its connection string needs `Server Compatibility Mode=NoTypeLoading` specified (see below for details). The other 8 connect with no such flag needed. psqlODBC needs no client-side flag, but to get `SQLTables`/`SQLColumns` (the ODBC standard API that returns table/column lists, used by Excel/Power BI/Access, etc.) working too, ExecDB's server side adds views/functions compatible with the Postgres system catalog (`pg_type`/`pg_class`/`pg_namespace`/`pg_attribute`, etc. — `cmd/execdb/pgcatalog.go`, see `.claude/rules/pgwire.md` for details). Rust's `postgres`/`tokio-postgres` crate independently reimplements the wire protocol, and testing it uncovered and fixed a latent ExecDB bug (a mismatch between the column OID reported by `Describe` versus `Execute`) — a fix that benefits every other driver too (see `.claude/rules/pgwire.md` for details).**
 
-### 採用範囲（サブセット）
+### Adopted scope (subset)
 
-Postgresプロトコルの全機能を実装するのではなく、接続・クエリ実行に必要な最小限のメッセージフローに絞る。
+Rather than implementing the full feature set of the Postgres protocol, ExecDB narrows it down to the minimal message flow needed for connecting and executing queries.
 
-| 実装する | 実装しない（初期スコープ外） |
+| Implemented | Not implemented (out of initial scope) |
 | :--- | :--- |
-| 認証ハンドシェイク（デフォルト`trust`相当、`--user`指定時のみcleartext password認証。§9参照） | SCRAM/MD5等の認証方式 |
-| Simple Query プロトコル（`Query`メッセージ） | `COPY`系プロトコル、LISTEN/NOTIFY |
-| Extended Query プロトコル（`Parse`/`Bind`/`Describe`/`Execute`/`Sync`/`Close`/`Flush`。フェーズ④Step 5で採用に変更——理由は下記） | NUMERICのバイナリ形式（複雑なため未実装。理由は下記） |
-| 結果値・パラメータ値双方のバイナリ形式（`int2`/`int4`/`int8`/`float4`/`float8`/`bool`/`bytea`/`timestamp`。理由は下記） | ─ |
-| `RowDescription` / `DataRow` / `CommandComplete` | 行数制限付き実行・`PortalSuspended`（`Execute`のmaxRowsは無視し常に最後まで実行する） |
-| エラー応答（`ErrorResponse`） | 詳細なSQLSTATEコード体系（簡略化したコードで代用） |
+| Authentication handshake (`trust`-equivalent by default; cleartext-password auth only when `--user` is given — see §9) | SCRAM/MD5 and other auth methods |
+| Simple Query protocol (`Query` message) | `COPY`-family protocol, LISTEN/NOTIFY |
+| Extended Query protocol (`Parse`/`Bind`/`Describe`/`Execute`/`Sync`/`Close`/`Flush` — switched to adopted in phase 4 Step 5, reasons below) | Binary format for NUMERIC (not implemented, due to complexity — reasons below) |
+| Binary format for both result values and parameter values (`int2`/`int4`/`int8`/`float4`/`float8`/`bool`/`bytea`/`timestamp` — reasons below) | — |
+| `RowDescription` / `DataRow` / `CommandComplete` | Row-count-limited execution, `PortalSuspended` (`Execute`'s maxRows is ignored — it always runs to completion) |
+| Error responses (`ErrorResponse`) | The full detailed SQLSTATE code taxonomy (a simplified set of codes stands in) |
 
-**Extended Queryを採用に変更した経緯（フェーズ④Step 1のスパイクで判明）:**
-Simple Queryのみの実装では、`pgx`（`default_query_exec_mode=simple_protocol`）や
-pgJDBC（`preferQueryMode=simple`）の明示指定が無いと接続できず、**Npgsqlに
-至っては常にExtended Queryを使うため接続そのものができない**——本節冒頭が
-掲げる「既存ドライバ資産がExecDB側の追加対応なしにそのまま接続できる」という
-目的と矛盾していたため、当初スコープ外としていたExtended Queryを採用に切り替えた
-（`.claude/rules/pgwire.md`参照）。
+**Why Extended Query was switched to adopted (discovered during the phase 4 Step 1 spike):**
+With Simple Query only, neither `pgx` (without `default_query_exec_mode=simple_protocol`) nor pgJDBC (without `preferQueryMode=simple`) could connect without an explicit override, and **Npgsql always uses Extended Query, so it couldn't connect at all** — this contradicted the very goal this section opens with, that "existing driver assets connect as-is with no ExecDB-specific work," so Extended Query, originally out of scope, was switched to adopted (see `.claude/rules/pgwire.md`).
 
-SQLiteは`$1`形式のプレースホルダをネイティブに解釈できるため
-（実測確認済み）、SQL文の書き換え層は不要。`Describe`（statement）が要求する
-実行前の結果列情報は、全プレースホルダにNULLを仮バインドした試験実行
-（SAVEPOINT/ROLLBACKで囲む）から`ColumnTypes()`を読み取ることで得ており、
-`engine`側への新規API追加は不要だった。**`Describe`（portal、Bind後）は
-NULLではなく、そのポータルの実際のBind値を仮バインドに使う**——`SELECT $1`
-のようなプレースホルダそのものが結果列になる式では、実際の値を通した方が
-`columnOID`のScanTypeフォールバックが正しい型を検出できる（real PostgreSQL
-自身も、クライアントが`Parse`で申告したパラメータ型からこの種の列の型を
-決定する）。当初はstatement/portal共通でNULL仮バインドのみだったが、
-フェーズ④Step 7でNpgsqlを検証した際、`SELECT $1`列がOID 25(text)に
-フォールバックしてしまい、`ExecuteScalarAsync()`の厳格な型キャストが失敗する
-形で発覚した（pgJDBC/node-postgresは値取得API側が文字列を暗黙変換するため
-表面化していなかった）。
+Since SQLite can natively interpret `$1`-style placeholders (empirically
+confirmed), no SQL rewriting layer is needed. The result-column information
+that `Describe` (statement) requires ahead of execution is obtained by
+reading `ColumnTypes()` from a trial run (wrapped in SAVEPOINT/ROLLBACK) with
+every placeholder trial-bound to NULL — no new API needed to be added to
+`engine`. **`Describe` (portal, after Bind) uses that portal's actual Bind
+values for the trial binding, instead of NULL** — for an expression like
+`SELECT $1`, where the placeholder itself becomes a result column, using the
+real value lets `columnOID`'s ScanType fallback detect the correct type
+(real PostgreSQL itself also determines this kind of column's type from the
+parameter type the client declared via `Parse`). Originally, both
+statement- and portal-level Describe trial-bound NULL uniformly; this
+surfaced during phase 4 Step 7 verification with Npgsql, when a `SELECT $1`
+column fell back to OID 25 (text), causing `ExecuteScalarAsync()`'s strict
+type cast to fail (pgJDBC/node-postgres hadn't surfaced this, since their
+value-retrieval APIs implicitly convert strings).
 
-**Npgsqlが接続すらできなかった経緯・原因（フェーズ④Step 7、実機確認で判明）:**
-Extended Query採用（Step 5）により`unsupported message type 'P'`は解消した
-はずだったが、実際にNpgsqlをデフォルト設定のまま接続すると
-`SQL logic error: no such function: version`で失敗した。原因は、Npgsqlの
-接続確立処理が独自に「型カタログのブートストラップ」を行うため——
-`SELECT version();`に続けて、`pg_type`/`pg_namespace`/`pg_class`/`pg_proc`/
-`pg_range`/`pg_attribute`/`pg_enum`という実在のPostgresシステムカタログを
-対象にした複数のSELECTを1つのSimple Queryメッセージとしてバッチ送信して
-くる。SQLiteにはこれらの関数・テーブルが一切無いため、接続確立の時点で
-最初の1文から失敗する。pgx/psycopg/node-postgres/pgJDBCはいずれもこの種の
-ブートストラップを行わない（デフォルト設定では発生しない）ため、この問題は
-Npgsql固有だった。**対処: 接続文字列に`Server Compatibility Mode=NoTypeLoading`
-を指定する**（CockroachDB・Redshift等、実物のPostgresでない互換DBに接続する
-際にNpgsqlが公式に案内している標準機能——ExecDB独自のパッチではない）。
-これを指定するとNpgsqlは型カタログのブートストラップ自体をスキップし、
-組み込みの既知型（int4/text/bool等）だけで動作するため、この問題を
-根本的に回避できる。`tests/drivers/dotnet/run.sh`の呼び出し元
-（`tests/drivers/run-all.sh`）がこの接続文字列パラメータを付与している。
+**Why Npgsql couldn't even connect at first, and its root cause (found during
+phase 4 Step 7 real-world verification):** adopting Extended Query (Step 5)
+was supposed to resolve `unsupported message type 'P'`, but actually
+connecting Npgsql with default settings failed with
+`SQL logic error: no such function: version`. The cause: Npgsql's own
+connection-establishment process independently performs "type catalog
+bootstrapping" — right after `SELECT version();`, it batch-sends multiple
+SELECTs, as a single Simple Query message, against real Postgres system
+catalogs — `pg_type`/`pg_namespace`/`pg_class`/`pg_proc`/`pg_range`/
+`pg_attribute`/`pg_enum`. Since SQLite has none of these functions/tables at
+all, the very first statement at connection time fails. None of
+pgx/psycopg/node-postgres/pgJDBC perform this kind of bootstrapping (it
+doesn't happen with default settings), so this problem was specific to
+Npgsql. **Fix: specify `Server Compatibility Mode=NoTypeLoading` in the
+connection string** (a standard feature Npgsql itself officially documents
+for connecting to compatible-but-not-genuine-Postgres backends like
+CockroachDB/Redshift — not an ExecDB-specific patch). With this specified,
+Npgsql skips the type-catalog bootstrapping entirely and operates using only
+its built-in known types (int4/text/bool, etc.), which fundamentally avoids
+this problem. The caller of `tests/drivers/dotnet/run.sh`
+(`tests/drivers/run-all.sh`) supplies this connection-string parameter.
 
-**psqlODBC（ODBC）対応で追加したpg_catalog互換ビュー（フェーズ④完了後の
-追加、実機確認で判明）:** psqlODBCは接続直後に実在のPostgresシステム
-カタログ`pg_type`へラージオブジェクト型の有無を問い合わせ、また
-`SQLTables`/`SQLColumns`（Excel/Power BI/Access等が使う、テーブル一覧・
-列一覧を返すODBC標準API）は`pg_class`/`pg_namespace`/`pg_attribute`/
-`pg_attrdef`への本格的なJOINクエリと`pg_get_expr()`/`current_schema()`
-関数呼び出しを送ってくる。SQLiteにはこれらが一切無いため、そのままでは
-接続もスキーマブラウズもできない。**対処: ExecDBの実スキーマ
-（`sqlite_master`・`pragma_table_info()`）から動的に導出する
-`TEMP`ビュー・テーブルを、pgwire接続ごとに用意する**
-（`cmd/execdb/pgcatalog.go`）。実データを一切汚染せず（`.tables`/`.dump`/
-スナップショットに現れない）、スキーマ変更後も常に最新の状態を反映する。
-クライアントが送ってくる`pg_catalog.pg_class`のようなスキーマ修飾付き
-参照は、サーバー側で`pg_catalog.`という文字列を除去してから実行することで
-吸収している（SQLiteのVIEWは別データベースのオブジェクトを参照できない
-という制約があり、`ATTACH DATABASE ... AS pg_catalog`した独立スキーマに
-`main`参照ビューを置く案は不採用——詳細な経緯は`.claude/rules/pgwire.md`
-参照）。`current_schema()`/`pg_get_expr()`は`engine.RegisterScalarFunction`
-（新設、`modernc.org/sqlite`のカスタム関数登録APIの薄いラッパー）経由で
-登録している。制約・インデックス・トリガー・複数スキーマは対象外——
-基本的な接続・型付きクエリ・スキーマブラウズが実スキーマに対して動く
-ことがゴールであり、本格的なPostgresシステムカタログの再現ではない。
+**The pg_catalog-compatible views added for psqlODBC (ODBC) support (added
+after phase 4 completion, found during real-world verification):** right
+after connecting, psqlODBC queries the real Postgres system catalog
+`pg_type` for the presence of the large-object type, and
+`SQLTables`/`SQLColumns` (the ODBC standard APIs — used by Excel/Power
+BI/Access, etc. — that return table/column lists) send full-blown JOIN
+queries against `pg_class`/`pg_namespace`/`pg_attribute`/`pg_attrdef` plus
+calls to the `pg_get_expr()`/`current_schema()` functions. Since SQLite has
+none of these at all, neither connecting nor schema-browsing works as-is.
+**Fix: provide `TEMP` views/tables, per pgwire connection, dynamically
+derived from ExecDB's real schema** (`sqlite_master`/
+`pragma_table_info()`) (`cmd/execdb/pgcatalog.go`). This never pollutes real
+data at all (it doesn't show up in `.tables`/`.dump`/snapshots), and always
+reflects the latest state even after schema changes. Schema-qualified
+references the client sends, like `pg_catalog.pg_class`, are absorbed by
+stripping the `pg_catalog.` string server-side before executing (SQLite's
+VIEWs can't reference objects in another database — an attempt to put
+`main`-referencing views in an independent schema via
+`ATTACH DATABASE ... AS pg_catalog` was rejected for that reason; see
+`.claude/rules/pgwire.md` for the full story). `current_schema()`/
+`pg_get_expr()` are registered via `engine.RegisterScalarFunction` (newly
+added, a thin wrapper around `modernc.org/sqlite`'s custom-function
+registration API). Constraints, indexes, triggers, and multiple schemas are
+out of scope — the goal is for basic connections, typed queries, and
+schema browsing to work against the real schema, not a full-fidelity
+reproduction of the Postgres system catalog.
 
-**結果値のバイナリ形式が必要になった経緯（フェーズ④Step 5、実機確認で判明）:**
-テキスト形式のみで実装したところ、`pgx`のデフォルト（Extended Query）接続で
-`int8`/`float8`/`numeric`/`bool`/`bytea`/`timestamp`列が軒並み失敗した
-（数値・日時型は明示的なエラー、`bool`/`bytea`は**エラーにならず黙って
-誤った値を返す**方が危険だった）。原因は`pgx`が`Bind`メッセージの
-`resultFormatCodes`で、これらの型に対しデフォルトでバイナリ形式を要求して
-くるため——ExecDB側でバイナリ結果値を実装しなければ、Extended Query採用の
-本来の目的（デフォルト設定での接続）が数値・BLOB・日時列を含む現実的な
-クエリでは達成できないことが判明した。NUMERICだけは対象外とした——SQLiteの
-NUMERIC親和性は内部的に必ずINTEGERかREALのいずれかで格納され（真の任意
-精度十進数を持たない）、Postgresの複雑なバイナリNUMERIC形式（base-10000
-桁グループ符号化）を実装する代わりに、NUMERIC親和性の宣言型は実行時のGo
-動的型（int64/float64）で`int8`/`float8`へ振り分ける設計とした（詳細は
-`cmd/execdb/pgtype.go`）。
+**Why a binary format for result values became necessary (found during
+phase 4 Step 5 real-world verification):** implementing text format only,
+`pgx`'s default (Extended Query) connection failed across the board for
+`int8`/`float8`/`numeric`/`bool`/`bytea`/`timestamp` columns (numeric/
+datetime types failed with an explicit error; `bool`/`bytea` were more
+dangerous, **silently returning a wrong value with no error at all**). The
+cause: `pgx` requests binary format by default for these types via the
+`resultFormatCodes` in its `Bind` message — meaning that without ExecDB
+implementing binary result values, Extended Query's whole point (connecting
+with default settings) couldn't be achieved for any realistic query
+involving numeric, BLOB, or datetime columns. NUMERIC alone was excluded —
+since SQLite's NUMERIC affinity is always internally stored as either
+INTEGER or REAL (it has no true arbitrary-precision decimal), rather than
+implementing Postgres's complex binary NUMERIC format (base-10000
+digit-group encoding), NUMERIC-affinity declared types are routed to
+`int8`/`float8` based on the actual runtime Go dynamic type
+(int64/float64) instead (see `cmd/execdb/pgtype.go` for details).
 
-**パラメータ側のバイナリ形式が必要になった経緯（フェーズ④Step 7、実機確認で判明）:**
-Step 5時点では「パラメータは常にテキスト形式」と位置づけ、`Bind`が
-バイナリ形式のパラメータを受け取ると一律拒否していた（`pgx`/`psycopg`は
-デフォルトでパラメータをテキスト送信するため、この時点では問題が顕在化
-しなかった）。ところがフェーズ④Step 7の他言語ドライバ検証で、pgJDBCが
-`PreparedStatement.setInt`/`setDouble`等をデフォルト設定のまま使うと、
-`Bind`メッセージのパラメータをバイナリ形式で送ってくることが判明した
-（`Parse`メッセージ自身が、例えば`setInt`に対して型OID 23／`int4`を
-自己申告している——`ParameterDescription`がどう答えるかとは無関係に、
-クライアント自身が把握している型で決め打ちしてくる）。この結果、
-prepared statement経由のDML/SELECTがpgJDBCのデフォルト設定では
-全滅するという、Extended Query採用の目的そのものに反する事態になったため、
-`Bind`側もパラメータのバイナリ形式をデコードする設計に変更した。
-デコードは`Parse`メッセージがクライアント自身の申告として送ってきた
-パラメータ型OID（従来は読み捨てていた）を頼りに行う——`Bind`の
-ワイヤ形式自体には型情報が一切含まれないため、これが唯一の手がかりに
-なる。対応OIDは結果値より広く、`int2`/`int4`/`float4`（結果値側では
-`columnOID`が使わないOIDだが、クライアントが申告するパラメータ型としては
-現実に出現する）を含む8種（詳細は`cmd/execdb/pgtype.go`の
-`decodeBinaryParam`）。クライアントが型OIDを申告せず（0／unspecified）に
-バイナリ形式で送ってきた場合は、デコードのしようがないため従来通り拒否する。
+**Why a binary format for parameters became necessary (found during phase
+4 Step 7 real-world verification):** as of Step 5, parameters were assumed
+to always be text format, and `Bind` uniformly rejected binary-format
+parameters (this hadn't surfaced a problem yet, since `pgx`/`psycopg` send
+parameters as text by default). But during phase 4 Step 7's other-language
+driver verification, it turned out that pgJDBC, using
+`PreparedStatement.setInt`/`setDouble`, etc. with default settings, sends
+`Bind` message parameters in binary format (the `Parse` message itself
+self-declares the type — e.g. type OID 23/`int4` for `setInt` — regardless
+of how `ParameterDescription` answers; the client hardcodes based on the
+type it itself knows). This meant that DML/SELECT via prepared statements
+failed across the board under pgJDBC's default settings — directly
+contradicting the whole point of adopting Extended Query — so `Bind` was
+changed to also decode binary-format parameters. Decoding relies on the
+parameter type OID the `Parse` message itself sent as the client's own
+declaration (previously discarded) — since the `Bind` wire format itself
+carries no type information at all, that's the only clue available. The
+supported OID set is wider than for result values — 8 types including
+`int2`/`int4`/`float4` (OIDs `columnOID` never uses on the result-value
+side, but which genuinely appear as client-declared parameter types — see
+`cmd/execdb/pgtype.go`'s `decodeBinaryParam`). If a client sends binary
+format without declaring a type OID (0/unspecified), there's no way to
+decode it, so it's rejected as before.
 
-### 認証（オプトイン、Zero-Authがデフォルト）
+### Authentication (opt-in, Zero-Auth by default)
 
-ExecDBは1章の「Zero-Auth」を核心思想とするが、必要な人だけが手軽に認証を有効化できるよう、オプトインの認証機構を用意する。
+While ExecDB holds "Zero-Auth" from chapter 1 as a core philosophy, it provides an opt-in authentication mechanism so that anyone who needs it can turn it on easily.
 
-* **デフォルト（`--user` 未指定）:** 常にZero-Auth。従来通り `trust` 相当で、パスワード不要・誰でも接続可能。
-* **`--user NAME` 指定時のパスワード取得方法:** モードを問わず、以下の優先順位で決定する。
-  1. **環境変数 `EXECDB_PASSWORD` が設定されている場合:** その値をパスワードとして使い、対話プロンプトはスキップする（REPLモード・サーバーモードのいずれでも、環境変数があれば最優先）。
-  2. **`EXECDB_PASSWORD` が未設定、かつREPLモードの場合:** 起動時に標準入力からパスワードを対話的に入力させる（`Password: ` のようなプロンプトでマスク入力、`golang.org/x/term` の `ReadPassword` 相当）。
-  3. **`EXECDB_PASSWORD` が未設定、かつ `--no-repl`（サーバーモード）の場合:** 対話する相手がいないため、**エラーとして起動を中止する**。
-* **「ユーザー」という概念は持たない:** マルチユーザー管理・権限分離等は行わず、あくまで「接続に必要な1組の名前＋パスワード」という単純な認証キーとして扱う。
-* **認証方式:** PostgreSQLワイヤープロトコルの `cleartext password` 認証を採用する（`SCRAM`/`MD5`等の本格的な方式は実装しない。§8「採用範囲」参照）。
+* **Default (`--user` unspecified):** always Zero-Auth. `trust`-equivalent as before — no password needed, anyone can connect.
+* **How the password is obtained when `--user NAME` is specified:** regardless of mode, decided in this priority order.
+  1. **If the `EXECDB_PASSWORD` environment variable is set:** use its value as the password, skipping the interactive prompt (this takes top priority whenever set, in either REPL mode or server mode).
+  2. **`EXECDB_PASSWORD` unset, and in REPL mode:** prompt interactively for the password from stdin at startup (a masked-input `Password: `-style prompt, equivalent to `golang.org/x/term`'s `ReadPassword`).
+  3. **`EXECDB_PASSWORD` unset, and `--no-repl` (server mode):** there's no one to prompt, so **startup is aborted with an error**.
+* **There's no concept of "a user":** no multi-user management or permission separation — it's treated simply as one name+password pair, a single authentication key required to connect.
+* **Auth method:** adopts the PostgreSQL wire protocol's `cleartext password` authentication (full mechanisms like `SCRAM`/`MD5` are not implemented — see "Adopted scope" in §8).
 
-### 型マッピング（確定、フェーズ④Step 1〜2）
+### Type mapping (finalized, phase 4 Steps 1-2)
 
-SQLiteは動的型付け（型アフィニティ）のため、列の値の型が固定されない。
-`RowDescription`メッセージで返すPostgres型OIDは、列の宣言型（`decltype`）を
-優先し、SQLite公式の型アフィニティ判定アルゴリズム（sqlite.org/datatype3.html
-§3.1）に沿って以下のように振り分ける。`BOOLEAN`・`DATE`/`DATETIME`/`TIME`は
-SQLite標準の5分類には無い区分だが、`modernc.org/sqlite`が観測可能な形で
-特別扱いする（`BOOLEAN`列は整数格納・`DATE`系列は`Scan`結果が`time.Time`に
-なる）ため、標準の5分類より先に判定する。
+Because SQLite is dynamically typed (type affinity), a column's value type isn't fixed. The Postgres type OID returned in the `RowDescription` message prioritizes the column's declared type (`decltype`), routed per SQLite's own official type-affinity algorithm (sqlite.org/datatype3.html §3.1) as follows. `BOOLEAN` and `DATE`/`DATETIME`/`TIME` aren't categories in SQLite's standard five-way classification, but since `modernc.org/sqlite` gives them observable special treatment (`BOOLEAN` columns are stored as integers; `DATE`-family columns come back from `Scan` as `time.Time`), they're checked before the standard five-way classification.
 
-| 宣言型（decltype）に含まれる部分文字列 | Postgres OID | 備考 |
+| Substring present in the declared type (decltype) | Postgres OID | Notes |
 | :--- | :--- | :--- |
-| `BOOL` | `bool`(16) | 標準5分類より優先判定 |
-| `DATE` または `TIME` | `timestamp`(1114) | 同上 |
-| `INT` | `int8`(20) | 標準分類「INTEGER」 |
-| `CHAR` / `CLOB` / `TEXT` | `text`(25) | 標準分類「TEXT」 |
-| `BLOB` | `bytea`(17) | 標準分類「BLOB」 |
-| `REAL` / `FLOA` / `DOUB` | `float8`(701) | 標準分類「REAL」 |
-| 上記いずれにも該当しない（標準分類「NUMERIC」のcatch-all、例: `NUMERIC`/`DECIMAL(10,2)`） | 下記フォールバックへ | 固定OIDを割り当てない（理由は下記） |
-| 宣言型なし（式・集約・リテラル列） | 下記フォールバックへ | 同上 |
+| `BOOL` | `bool`(16) | Checked before the standard five-way classification |
+| `DATE` or `TIME` | `timestamp`(1114) | Same as above |
+| `INT` | `int8`(20) | Standard classification "INTEGER" |
+| `CHAR` / `CLOB` / `TEXT` | `text`(25) | Standard classification "TEXT" |
+| `BLOB` | `bytea`(17) | Standard classification "BLOB" |
+| `REAL` / `FLOA` / `DOUB` | `float8`(701) | Standard classification "REAL" |
+| Matches none of the above (the standard classification "NUMERIC" catch-all, e.g. `NUMERIC`/`DECIMAL(10,2)`) | Falls through to the fallback below | No fixed OID assigned (reasons below) |
+| No declared type (expression/aggregate/literal column) | Falls through to the fallback below | Same as above |
 
-**フォールバック（実行時のGo動的型をサンプリング）:** 上表で確定しない列は、
-先頭行を試験実行して得た`ScanType()`の実際のGo型で振り分ける
-（`int64`→`int8`、`float64`→`float8`、`bool`→`bool`、`[]byte`→`bytea`、
-`time.Time`→`timestamp`、それ以外・行が無い場合→`text`）。**NUMERIC親和性の
-宣言型をこの経路に回しているのは意図的な設計判断**——SQLiteのNUMERIC親和性は
-内部的に必ずINTEGERかREALのいずれかで格納され真の任意精度十進数を持たないため、
-Postgresの複雑なバイナリNUMERIC形式（base-10000桁グループ符号化）を実装する
-代わりに、`int8`/`float8`へ振り分けることでその実装自体を不要にしている。
+**Fallback (sampling the actual runtime Go dynamic type):** columns not
+settled by the table above are routed by the actual Go type of `ScanType()`
+obtained by trial-running the first row
+(`int64`→`int8`, `float64`→`float8`, `bool`→`bool`, `[]byte`→`bytea`,
+`time.Time`→`timestamp`, anything else or no rows→`text`). **Routing
+NUMERIC-affinity declared types through this path is a deliberate design
+decision** — since SQLite's NUMERIC affinity is always internally stored as
+either INTEGER or REAL, with no true arbitrary-precision decimal, routing
+it to `int8`/`float8` avoids the need to implement Postgres's complex
+binary NUMERIC format (base-10000 digit-group encoding) at all.
 
-値のテキスト/バイナリエンコードは、OIDではなく`Scan`後の実際のGo動的型を
-見て行う（宣言型と実際の値の型が食い違う——型アフィニティに違反する値が
-入っている場合があるため）。詳細な実装は`cmd/execdb/pgtype.go`の
-`columnOID`/`affinityOID`/`scanTypeOID`/`pgEncodeValue`を参照。
+Text/binary encoding of values is decided by the actual Go dynamic type
+after `Scan`, not by the OID (since the declared type and the actual value's
+type can disagree — a value violating type affinity may be stored). See
+`columnOID`/`affinityOID`/`scanTypeOID`/`pgEncodeValue` in
+`cmd/execdb/pgtype.go` for the implementation details.
 
-**パラメータ（`Bind`）側のバイナリ形式デコードで対応するOID:** `int2`(21)/
-`int4`(23)/`int8`(20)/`float4`(700)/`float8`(701)/`bool`(16)/`bytea`(17)/
-`timestamp`(1114)の8種（`int2`/`int4`/`float4`は結果値側の`columnOID`が
-一度も返さないOIDだが、クライアントが自ら申告するパラメータ型としては
-独立に出現するため対応範囲に含む——詳細は下記「パラメータ側のバイナリ
-形式が必要になった経緯」参照）。
+**OIDs supported for binary-format decoding on the parameter (`Bind`)
+side:** 8 types — `int2`(21)/`int4`(23)/`int8`(20)/`float4`(700)/
+`float8`(701)/`bool`(16)/`bytea`(17)/`timestamp`(1114) (`int2`/`int4`/
+`float4` are OIDs `columnOID` never returns on the result-value side, but
+they independently appear as client-self-declared parameter types — see
+"Why a binary format for parameters became necessary" above for details).
 
-### アクセス制御（§2）との統合
+### Integration with access control (§2)
 
-DDLは外部I/F経由では引き続き拒否する。Postgresプロトコル上では `ErrorResponse` メッセージとして返す。
+DDL continues to be rejected over the external I/F. On the Postgres protocol, this comes back as an `ErrorResponse` message.
 
 ```
 ErrorResponse
   Severity: ERROR
-  Code:     42501  (insufficient_privilege 相当のSQLSTATEを流用)
+  Code:     42501  (borrowing the SQLSTATE for insufficient_privilege)
   Message:  "DDL statements are not allowed via external interface"
 ```
 
-`SET`/`SHOW`は、この「許可／拒否」の二分法に属さない第3の区分として扱う
-（§2「`SET`/`SHOW`等のセッションコマンド」参照）。外部I/F層が内部SQLエンジンへ
-渡す前に横取りし、接続ごとのメモリ上のマップへ値を保持するだけで
-（`CommandComplete("SET")`／`SHOW`は1列1行の結果）、`ErrorResponse`は返さない。
+`SET`/`SHOW` are treated as a third category that doesn't belong to this "allow/reject" dichotomy (see "`SET`/`SHOW` and other session commands" in §2). The external-I/F layer intercepts them before they reach the internal SQL engine and just keeps the value in an in-memory, per-connection map (`CommandComplete("SET")` / a one-column, one-row result for `SHOW`) — no `ErrorResponse` is returned.
 
-### トランザクション（TCL）の扱い
+### Transaction (TCL) handling
 
-Postgresプロトコルは接続（コネクション）自体がステートフルなため、HTTPのような無コネクション方式で必要になる「セッションID方式」は不要になる。TCPコネクション単位でそのまま `BEGIN` 〜 `COMMIT`/`ROLLBACK` を扱う、Postgres本来のセッション管理にそのまま準拠する。
+Since a Postgres protocol connection is itself stateful, the "session ID" approach needed for a connectionless scheme like HTTP is unnecessary. ExecDB handles `BEGIN` through `COMMIT`/`ROLLBACK` directly per TCP connection, following Postgres's own native session management as-is.
 
-**実装:** 1本のTCP/UNIX Domain Socket接続は、`engine`の`DB.Session(ctx)`が返す
-専有コネクション1つに対応する（6章参照）。`BEGIN`/`COMMIT`/`ROLLBACK`はその
-コネクション上へSQL文としてそのまま送られ、SQLite自身が実トランザクション
-として扱う。ExecDB側でトランザクション状態を再実装することはしないが、
-`ReadyForQuery`メッセージのステータスバイトは実際の状態を反映する:
-`'I'`（アイドル）／`'T'`（トランザクション中）／`'E'`（トランザクション中に
-エラーが発生し、`COMMIT`/`ROLLBACK`以外を受け付けない状態）。`'E'`状態で
-`COMMIT`/`ROLLBACK`以外の文を送ると、実行はせず`ErrorResponse`
-（SQLSTATE `25P02`、"current transaction is aborted"）で拒否する——
-表示上のステータスだけ`'E'`にして実際には文を実行してしまう中途半端な
-実装は、トランザクション状態を厳密に追跡するドライバ（pgx/JDBC等）を
-混乱させるため採用しない。
+**Implementation:** one TCP/UNIX Domain Socket connection corresponds to one dedicated connection returned by `engine`'s `DB.Session(ctx)` (see chapter 6). `BEGIN`/`COMMIT`/`ROLLBACK` are sent to that connection as plain SQL statements, and SQLite itself treats them as a real transaction. ExecDB doesn't reimplement transaction state on its own side, but the `ReadyForQuery` message's status byte does reflect the actual state: `'I'` (idle) / `'T'` (in a transaction) / `'E'` (an error occurred inside a transaction, and only `COMMIT`/`ROLLBACK` are accepted from here on). Sending anything other than `COMMIT`/`ROLLBACK` while in state `'E'` is rejected — without executing it — with an `ErrorResponse` (SQLSTATE `25P02`, "current transaction is aborted") — a half-baked implementation that only shows `'E'` in the status while actually still executing the statement would confuse drivers (pgx/JDBC, etc.) that strictly track transaction state, so that approach is not adopted.
 
-### クエリキャンセル（`CancelRequest` / `BackendKeyData`、フェーズ④Step 6）
+### Query cancellation (`CancelRequest` / `BackendKeyData`, phase 4 Step 6)
 
-クエリキャンセルには意図的に別々の2つの経路がある。
+There are deliberately two separate paths for query cancellation.
 
-1. **クライアント切断時の自動キャンセル**（フェーズ②Step 5から）: クエリ実行中の
-   接続への読み取りを別goroutineで監視し、クライアントの切断（あるいは予期しない
-   データ送出）を検知すると実行中のクエリをキャンセルする。
-2. **`CancelRequest`プロトコル**（別接続からの明示キャンセル要求）: 接続確立時、
-   サーバーは`BackendKeyData`メッセージで疑似PID・secretの組をクライアントへ
-   送る。クライアントは**別の新しいコネクション**を張り、そのPID・secretを
-   含む`CancelRequest`を送ることで、対象の接続で実行中のクエリだけを中断できる
-   （接続自体は切断されず、以後も使い続けられる）。PID・secretが一致しない、
-   または対象がアイドル中（実行中のクエリが無い）の場合は無音のno-op——
-   実PostgreSQL準拠。
+1. **Automatic cancellation on client disconnect** (since phase 2 Step 5): a
+   separate goroutine watches for reads on the connection while a query is
+   executing, and cancels the running query as soon as it detects the
+   client disconnecting (or sending unexpected data).
+2. **The `CancelRequest` protocol** (an explicit cancel request from another
+   connection): at connection establishment, the server sends the client a
+   pseudo-PID/secret pair via the `BackendKeyData` message. The client opens
+   **a separate, new connection** and sends a `CancelRequest` carrying that
+   PID/secret, which interrupts only the query currently running on the
+   target connection (the connection itself is not disconnected, and can
+   keep being used afterward). If the PID/secret doesn't match, or the
+   target is idle (no query running), it's a silent no-op — matching real
+   PostgreSQL.
 
-両者は実装上、同じキャンセル機構を共有する（`cmd/execdb/pgcancel.go`）。
-詳細・実装時に発見した設計上の注意点（`context.CancelFunc`の使い回しに関する
-落とし穴）は`.claude/rules/pgwire.md`参照。
+Both share the same cancellation mechanism at the implementation level
+(`cmd/execdb/pgcancel.go`). See `.claude/rules/pgwire.md` for details and a
+design pitfall discovered during implementation (around reusing a
+`context.CancelFunc`).
 
-### トランスポート
+### Transport
 
-| トランスポート | 備考 |
+| Transport | Notes |
 | :--- | :--- |
-| TCP | 標準的な接続方式。JDBC等の各種ドライバはデフォルトでこちらを使う |
-| UNIX Domain Socket | Postgres自体もローカル接続にUnixソケットを使う慣習があり、psycopg等一部ドライバはこちらにも対応。ローカル用途向けのオプション |
+| TCP | The standard connection method. Various drivers like JDBC use this by default |
+| UNIX Domain Socket | Postgres itself has a convention of using a Unix socket for local connections, and some drivers like psycopg support this too. An option aimed at local use |
 
 ---
 
-## 9. 起動オプション
+## 9. Startup options
 
-起動時のコマンドライン引数は、短縮フラグ（1文字）と長いフラグの両方を用意する。短縮フラグは大文字小文字の混在による覚えにくさを避けるため、**全て小文字**で統一する。
+Command-line arguments at startup provide both a short flag (one character) and a long flag. Short flags are kept **entirely lowercase**, to avoid the mnemonic difficulty of mixed case.
 
-| 短縮 | 長い形式 | 型 | デフォルト | 役割 |
+| Short | Long form | Type | Default | Role |
 | :--- | :--- | :--- | :--- | :--- |
-| `-p` | `--pg-addr` | string | `""`（無効） | PostgreSQL互換ワイヤープロトコルのTCP待受アドレス（例: `:5432`、`127.0.0.1:5432`）。未指定なら外部I/Fを起動しない |
-| `-s` | `--socket` | string | `""`（無効） | 同プロトコルをUNIX Domain Socket経由でも待ち受ける場合のパス（例: `/tmp/execdb.sock`）。未指定ならSocket I/Fを起動しない |
-| `-u` | `--user` | string | `""`（無効、Zero-Auth） | 指定すると外部I/Fの接続に認証キー（名前＋パスワード）を要求する（§8参照）。パスワードは環境変数 `EXECDB_PASSWORD` があればそれを使用、なければREPLモード時のみ起動時に対話入力させる（`--no-repl`かつ未設定の場合はエラー） |
-| `-o` | `--snapshot-as` | string | （未指定） | `.snapshot`実行時、および`--no-repl`（サーバーモード）終了時の自動保存（下記参照）で使うデフォルトファイル名 |
-| `-n` | `--no-repl` | bool | `false` | REPLを起動せず、外部I/Fのみでバックグラウンド常駐する（サーバーモード） |
-| `-q` | `--quiet` | bool | `false` | 起動時のバナー・ログ出力を抑制する |
-| `-t` | `--timestamp` | bool | `false` | 保存時にファイル名へタイムスタンプを付与するか（下記参照） |
-| `-i` | `--snapshot-interval` | duration | `0`（無効） | 指定間隔で自動的に別名スナップショット保存を行う（例: `5m`, `1h`）。REPLモード・サーバーモードいずれでも有効 |
-| `-h` | `--help` | bool | - | ヘルプ表示 |
+| `-p` | `--pg-addr` | string | `""` (disabled) | TCP listen address for the PostgreSQL-compatible wire protocol (e.g. `:5432`, `127.0.0.1:5432`). If unspecified, the external I/F is not started |
+| `-s` | `--socket` | string | `""` (disabled) | Path for also listening over the same protocol via a UNIX Domain Socket (e.g. `/tmp/execdb.sock`). If unspecified, the Socket I/F is not started |
+| `-u` | `--user` | string | `""` (disabled, Zero-Auth) | When specified, requires an authentication key (name+password) for external-I/F connections (see §8). The password uses the `EXECDB_PASSWORD` environment variable if set; otherwise, only in REPL mode, it's prompted for interactively at startup (an error if `--no-repl` and unset) |
+| `-o` | `--snapshot-as` | string | (unspecified) | The default filename used by `.snapshot`, and by the auto-save on `--no-repl` (server mode) shutdown (see below) |
+| `-n` | `--no-repl` | bool | `false` | Runs headless in the background with only the external I/F, without starting the REPL (server mode) |
+| `-q` | `--quiet` | bool | `false` | Suppresses the startup banner/log output |
+| `-t` | `--timestamp` | bool | `false` | Whether to append a timestamp to the filename on save (see below) |
+| `-i` | `--snapshot-interval` | duration | `0` (disabled) | Automatically saves a separate-file snapshot at this interval (e.g. `5m`, `1h`). Works in either REPL mode or server mode |
+| `-h` | `--help` | bool | - | Show help |
 
-`--pg-addr` と `--socket` はどちらも省略可能・併用可能。両方省略した場合はREPL単体（外部I/Fなし）で起動する。
+Both `--pg-addr` and `--socket` are optional and can be used together. If both are omitted, it starts as a standalone REPL (no external I/F).
 
-### タイムスタンプ付与
+### Timestamping
 
-`.snapshot` 実行時、ファイル名に日時タイムスタンプ（`_YYYYMMDDHHMMSS`）を付与するかどうかを `--timestamp`（`-t`）で切り替えられる。**boolフラグ**であり、値の選択肢は持たない。
+Whether a `_YYYYMMDDHHMMSS` date/time timestamp is appended to the filename on `.snapshot` can be toggled with `--timestamp` (`-t`). It's a **bool flag** with no choice of value.
 
-* **`--timestamp` を指定した場合:** 以下のルールでファイル名を生成する（ファイル名省略時・明示指定時、CLI起動オプション・REPLの`.snapshot`コマンドのいずれでも共通のルール）。
-  1. ベースとなるファイル名（拡張子を除く部分）から、既存の `_YYYYMMDDHHMMSS` パターンがあれば取り除く（二重付与を防ぐ）。
-  2. 拡張子の直前に新しい `_YYYYMMDDHHMMSS` を挿入する。
-  3. Windows環境で拡張子が省略されている場合は `.exe` を付与する。
+* **When `--timestamp` is given:** the filename is generated by the following rule (a single, shared rule regardless of whether the filename is omitted or given explicitly, and regardless of whether it comes from a CLI startup option or the REPL's `.snapshot` command).
+  1. If the base filename (excluding the extension) already contains a `_YYYYMMDDHHMMSS` pattern, it's stripped first (to avoid double-appending).
+  2. A new `_YYYYMMDDHHMMSS` is inserted right before the extension.
+  3. On Windows, if the extension is omitted, `.exe` is appended.
 
-  | ベースとなるファイル名 | 生成結果 |
+  | Base filename | Result |
   | :--- | :--- |
-  | `mydb`（ファイル名省略、実行中バイナリ名がベース） | `mydb_YYYYMMDDHHMMSS` |
-  | `mydb_20260101120000`（既存タイムスタンプあり） | `mydb_YYYYMMDDHHMMSS`（古いものは除去し差し替え） |
+  | `mydb` (filename omitted; the running binary's name is the base) | `mydb_YYYYMMDDHHMMSS` |
+  | `mydb_20260101120000` (already has a timestamp) | `mydb_YYYYMMDDHHMMSS` (the old one is stripped and replaced) |
   | `mydb.exe` | `mydb_YYYYMMDDHHMMSS.exe` |
   | `mydb_20260101120000.exe` | `mydb_YYYYMMDDHHMMSS.exe` |
-  | `mydb`（`-o mydb` で明示指定、Windows環境） | `mydb_YYYYMMDDHHMMSS.exe`（拡張子省略時は`.exe`を付与） |
+  | `mydb` (given explicitly via `-o mydb`, on Windows) | `mydb_YYYYMMDDHHMMSS.exe` (`.exe` is appended when the extension is omitted) |
 
-* **`--timestamp` を指定しない場合（デフォルト）:** タイムスタンプは付与せず、指定されたファイル名（またはWindowsでは拡張子`.exe`を補完したファイル名）をそのまま使う。同名ファイルへの上書きが起きうる。
+* **When `--timestamp` is not given (the default):** no timestamp is appended — the given filename (or, on Windows, the filename with the `.exe` extension filled in) is used as-is. Overwriting a same-named file can happen.
 
-  | ベースとなるファイル名 | 生成結果 |
+  | Base filename | Result |
   | :--- | :--- |
-  | `mydb` | `mydb`（Linux/macOS）／`mydb.exe`（Windows） |
+  | `mydb` | `mydb` (Linux/macOS) / `mydb.exe` (Windows) |
   | `mydb.exe` | `mydb.exe` |
 
-このオプションは起動時のデフォルト値として機能するが、REPLの `.snapshot` コマンド実行時にも同様のオプションでその場で上書き指定できる。
+This option acts as the default value at startup, but the same option can also be given on the spot when running the REPL's `.snapshot` command, overriding it.
 
 ```
 .snapshot bug_123 --timestamp
 ```
 
-`.overwrite` にはファイル名指定の概念がないため（自分自身のパスに固定）、`--timestamp` オプションは適用されない。
+`.overwrite` has no concept of specifying a filename (it's fixed to its own path), so the `--timestamp` option doesn't apply to it.
 
-### サーバーモード（`--no-repl`）の停止・保存
+### Server mode (`--no-repl`) shutdown and saving
 
-`--no-repl` で起動した場合、REPLが存在しないため `.snapshot` / `.overwrite` コマンドを打つ手段がない。代わりに、**終了シグナル受信時に自動でスナップショット保存を行ってから終了する**方式を採る。
+When started with `--no-repl`, there's no REPL, and thus no way to type a `.snapshot`/`.overwrite` command. Instead, ExecDB takes the approach of **automatically saving a snapshot on receipt of a termination signal, then exiting**.
 
-* **保存方法:** `SIGTERM` / `SIGINT` を受信すると、`--snapshot-as` / `--timestamp` の設定に従って（別名ファイルとして）自動保存してからプロセスを終了する。
-* **REPLモードとの方針の違い:** §1・§4で「保存は明示操作のみ、自動保存なし」としている原則は **REPLモードにおける方針**である。サーバーモードでは `.snapshot` を打つ手段自体が存在しないため、終了シグナルを「保存の引き金」として扱う。この違いはサーバーモード固有の例外として扱う。
-* **プラットフォーム別の対応状況:**
+* **How it saves:** on receiving `SIGTERM`/`SIGINT`, it auto-saves (as a separate file) per the `--snapshot-as`/`--timestamp` settings, then exits the process.
+* **How this differs from REPL mode's policy:** the principle stated in §1/§4 — "save only via an explicit action, no auto-save" — is **a REPL-mode policy**. In server mode, since there's no way to type `.snapshot` at all, the termination signal itself is treated as "the trigger for a save." This difference is treated as an exception specific to server mode.
+* **Platform-specific support status:**
 
-  | OS | 対応状況 |
+  | OS | Support status |
   | :--- | :--- |
-  | Linux / macOS | 標準的な `SIGTERM` / `SIGINT` ハンドリングで対応（`docker stop`、systemd等からの終了要求を含む） |
-  | Windows（コンソールにアタッチした状態） | Ctrl+C 等のコンソール制御イベントが Go の `os/signal` を通じて `SIGINT` 相当に変換されるため、対応可能 |
-  | Windows（Windows Serviceとしてのヘッドレス常駐） | **v1のスコープ外（既知の制限事項）。** コンソールを持たないため制御イベントが届かず、正常な自動保存・終了は保証されない。将来的に必要であれば `golang.org/x/sys/windows/svc` によるService Control Manager統合を別途検討する |
+  | Linux / macOS | Supported via standard `SIGTERM`/`SIGINT` handling (including shutdown requests from `docker stop`, systemd, etc.) |
+  | Windows (attached to a console) | Supported, since console control events like Ctrl+C are converted to `SIGINT`-equivalent signals via Go's `os/signal` |
+  | Windows (running headless as a Windows Service) | **Out of scope for v1 (a known limitation).** Since there's no console, control events never arrive, and a proper auto-save-and-exit isn't guaranteed. If needed in the future, Service Control Manager integration via `golang.org/x/sys/windows/svc` would be considered separately |
 
-### 定期スナップショット（`--snapshot-interval`）
+### Periodic snapshots (`--snapshot-interval`)
 
-`--snapshot-interval`（`-i`）を指定すると、その間隔で自動的に別名スナップショット保存を繰り返す。REPLモード・サーバーモードのどちらでも有効。
+Given `--snapshot-interval` (`-i`), a separate-file snapshot save is automatically repeated at that interval. Works in either REPL mode or server mode.
 
-* **用途:** REPLモードでは「長時間の対話セッション中に保存し忘れてクラッシュし、全データを失う」事故を防ぐ保険機能として、サーバーモードでは定期バックアップとして利用できる。§1の「保存は明示操作のみ」という原則に対する、オプトインの例外機能という位置づけ。
-* **保存方式:** 別名保存（`.snapshot`相当）のみに対応する。自己上書き（`.overwrite`相当）の定期実行は、実行中ファイルへの頻繁な書き換えによるリスクが高いため、サポートしない。
-* **ファイル名:** `--snapshot-as` / `--timestamp` の設定に従う。`--timestamp` を指定した場合はタイムスタンプ付きファイルが間隔ごとに生成され続けるため、ファイルの肥大化・整理は §4 と同様に運用側（ユーザー）に委ねる。固定ファイル名で上書きし続けたい場合は `--timestamp` を指定しない（デフォルト）。
+* **Purpose:** in REPL mode, this serves as a safety net against the accident of "forgetting to save during a long interactive session and losing everything to a crash"; in server mode, it works as a periodic backup. It's positioned as an opt-in exception to the "save only via an explicit action" principle from §1.
+* **Save method:** only separate-file saves (`.snapshot`-equivalent) are supported. Periodic self-overwrite (`.overwrite`-equivalent) is not supported, due to the high risk from frequently rewriting the file currently running.
+* **Filename:** follows the `--snapshot-as`/`--timestamp` settings. If `--timestamp` is given, a new timestamped file keeps being generated at every interval, so file growth/cleanup is, as in §4, left to operational (user) judgment. To keep overwriting a fixed filename instead, don't specify `--timestamp` (the default).
 
 ---
 
-## 10. ライフサイクル・動作フロー
+## 10. Lifecycle and operational flow
 
 ```text
-[1. 起動]
-   └─> ./execdb を実行
-   └─> バイナリ末尾からデータを読み込み、メモリ（RAM）へ展開
-   └─> （`--user` 指定時のみ）パスワードを決定（§8, §9参照）
-        ├─> `EXECDB_PASSWORD` 環境変数が設定されていればそれを使用（対話プロンプトなし）
-        ├─> 未設定 かつ REPLモード: 標準入力から対話的にパスワード入力させる
-        └─> 未設定 かつ `--no-repl`（サーバーモード）: エラーで起動中止
-   └─> バックグラウンドで外部 I/F (PostgreSQL互換ワイヤープロトコル) を起動
-   └─> 起動時バナーを表示（下記参照。`-q`/`--quiet` で抑制可能）
-   └─> フォアグラウンドで「対話式コンソール (REPL)」を開始（`--no-repl` 時はここでサーバーモードへ移行）
+[1. Startup]
+   └─> Run ./execdb
+   └─> Read data from the end of the binary and unpack it into memory (RAM)
+   └─> (only when `--user` is given) Determine the password (see §8, §9)
+        ├─> If the `EXECDB_PASSWORD` environment variable is set, use it (no interactive prompt)
+        ├─> Unset, and in REPL mode: prompt interactively for a password from stdin
+        └─> Unset, and `--no-repl` (server mode): abort startup with an error
+   └─> Start the external I/F (PostgreSQL-compatible wire protocol) in the background
+   └─> Show the startup banner (see below; suppressible with `-q`/`--quiet`)
+   └─> Start the "interactive console (REPL)" in the foreground (with `--no-repl`, transition to server mode here instead)
 
-[2. 運用・クエリ実行]
-   ├─> 対話コンソール : DDL / DML / TCL のすべてを実行可能
-   └─> 外部 I/F      : DML / TCL のみを受け付け（DDLは ErrorResponse で弾く）
+[2. Operation & query execution]
+   ├─> Interactive console: can run all of DDL / DML / TCL
+   └─> External I/F      : accepts only DML / TCL (DDL is rejected with an ErrorResponse)
 
-[3. 保存（別名）]
-   └─> .snapshot コマンドを実行（明示操作のみ、自動保存なし）
-   └─> メモリ上の最新状態 ＋ エンジン本体をパッキング
-   └─> 新しい別名実行ファイル（例: execdb_20260831_150000）を生成して出力
+[3. Save (separate file)]
+   └─> Run the .snapshot command (only via an explicit action, no auto-save)
+   └─> Pack the latest in-memory state together with the engine itself
+   └─> Generate and output a new, differently-named executable (e.g. execdb_20260831_150000)
 
-[3'. 保存（自己上書き）]
-   └─> .overwrite コマンドを実行（明示操作のみ）
-   └─> 自分自身を <path>.execdb_old へ退避 → 空いた元のパスへ新しい中身を書き込み（§7）
-   └─> 成功したらそのままREPLを終了（この操作のみ、保存と終了が同時に起きる。§4参照）
+[3'. Save (self-overwrite)]
+   └─> Run the .overwrite command (only via an explicit action)
+   └─> Stage itself aside to <path>.execdb_old → write the new content into the now-vacant original path (§7)
+   └─> On success, exit the REPL right there (this is the only operation where saving and exiting happen together; see §4)
 
-[4. 停止（REPLモード）]
-   └─> 通常の終了手段: .exit / .quit コマンド、または標準入力のEOF（Ctrl+D）
-   └─> Ctrl+C（SIGINT）は対話端末では終了ではなく中断コマンドとして扱う（sqlite3のシェル準拠）:
-        ├─> クエリ実行中に押すと、そのクエリだけを中断してプロンプトへ戻る（プロセスは終了しない）
-        ├─> アイドル時（クエリ非実行中）に1回押すと、入力中の複数行分の未確定なSQLを破棄して
-        │    プロンプトを出し直すだけで、プロセスは終了しない
-        ├─> アイドル時に間に新しい入力行を挟まず連続で2回押すと、そこでプロセスを終了する
-        │    （終了コード1。新しい入力行を1行でも読むと連続回数はリセットされる）
-        └─> 標準入力が対話端末でない場合（パイプ・スクリプト実行時）はこのハンドラを一切
-             登録せず、SIGINTは通常のプロセス終了として扱われる（スクリプトから起動した
-             ExecDBをCtrl+Cで止められなくなる事故を防ぐため）
-   └─> SIGTERMを受信した場合（対話モードでは自動保存の対象外。サーバーモードとの違いは
-        [4'.]参照）はプロセスを終了する
-   └─> いずれの終了経路でも、メモリ上のデータは保存されず消える（揮発性が前提。保存したい
-        場合は終了前に .snapshot または .overwrite を実行する）
+[4. Shutdown (REPL mode)]
+   └─> Normal exit paths: the .exit / .quit commands, or EOF on stdin (Ctrl+D)
+   └─> Ctrl+C (SIGINT) on an interactive terminal is treated not as an exit but as an interrupt command (following the sqlite3 shell's convention):
+        ├─> Pressed while a query is executing: interrupts just that query and returns to the prompt (the process doesn't exit)
+        ├─> Pressed once while idle (no query running): discards an in-progress, unconfirmed multi-line SQL statement and just reprints the prompt (the process doesn't exit)
+        ├─> Pressed twice in a row while idle with no new input line typed in between: exits the process at that point
+        │    (exit code 1; reading even a single new input line resets the consecutive-press count)
+        └─> If stdin is not an interactive terminal (piped/scripted execution), this handler is never registered at all,
+             and SIGINT is treated as ordinary process termination (to avoid the accident of an ExecDB launched from a
+             script becoming impossible to stop with Ctrl+C)
+   └─> On receiving SIGTERM (not subject to auto-save in interactive mode; see [4'.] for the difference from server mode),
+        the process exits
+   └─> Regardless of the exit path, in-memory data is not saved and is lost (volatility is assumed as a given —
+        run .snapshot or .overwrite before exiting if you want to save it)
 
-[4'. 停止（サーバーモード、--no-repl）]
-   └─> SIGTERM / SIGINT（Windowsのヘッドレス常駐時は対象外。§9参照）を受信
-   └─> --snapshot-as / --timestamp の設定に従い自動でスナップショット保存（別名）
-   └─> 保存完了後にプロセスを終了
+[4'. Shutdown (server mode, --no-repl)]
+   └─> Receives SIGTERM / SIGINT (not applicable when running headless on Windows; see §9)
+   └─> Automatically saves a snapshot (separate file) per the --snapshot-as / --timestamp settings
+   └─> Exits the process once the save completes
 ```
 
-### 起動時バナー
+### Startup banner
 
-起動時、REPL・外部I/Fが利用可能になったことを示すバナーを表示する。表示内容は
-バージョン、埋め込みデータの有無・スナップショット名、外部I/Fの待受状況（指定
-されている場合のみ）、`--user`認証が有効かどうか（パスワード自体は表示しない）、
-サーバーモードかどうか。`.status`のような専用コマンドは設けず、起動時にこの
-バナーで一度提示することに一本化する。`-q`/`--quiet`指定時はバナー全体を抑制する。
+At startup, a banner is shown indicating that the REPL/external I/F are now available. It shows: the version, whether there's embedded data and, if so, the snapshot's name, the external I/F's listening status (only if configured), whether `--user` authentication is enabled (the password itself is never shown), and whether it's in server mode. Rather than a dedicated command like `.status`, this is consolidated into presenting it once, via this banner, at startup. `-q`/`--quiet` suppresses the entire banner.
 
-**REPLモード、外部I/Fあり:**
+**REPL mode, external I/F enabled:**
 ```
 ExecDB v0.1.0
 Loaded snapshot: mydb_20260901120000
@@ -748,14 +736,14 @@ Listening on /tmp/execdb.sock (UNIX Domain Socket)
 Enter ".help" for usage hints.
 ```
 
-**REPLモード、データなし・外部I/Fなし:**
+**REPL mode, no data, no external I/F:**
 ```
 ExecDB v0.1.0
 No embedded data. Starting with an empty in-memory database.
 Enter ".help" for usage hints.
 ```
 
-**サーバーモード（`--no-repl`）:**
+**Server mode (`--no-repl`):**
 ```
 ExecDB v0.1.0
 Loaded snapshot: mydb_20260901120000

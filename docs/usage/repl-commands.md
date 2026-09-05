@@ -1,5 +1,7 @@
 # REPL commands
 
+*日本語版はこちら: [repl-commands_ja.md](repl-commands_ja.md)*
+
 Inside the interactive console, anything not starting with `.` is treated
 as SQL (SQLite dialect — DDL, DML, and TCL `BEGIN`/`COMMIT`/`ROLLBACK` are
 all available). Commands starting with `.` are ExecDB's own control

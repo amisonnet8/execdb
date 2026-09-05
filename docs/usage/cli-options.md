@@ -1,5 +1,7 @@
 # CLI options
 
+*日本語版はこちら: [cli-options_ja.md](cli-options_ja.md)*
+
 ```
 execdb [options]
 ```

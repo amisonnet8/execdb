@@ -1,5 +1,7 @@
 # A zero-setup SQL sandbox
 
+*日本語版はこちら: [sql-sandbox_ja.md](sql-sandbox_ja.md)*
+
 For learning SQL, trying out a query idea, or a quick classroom/workshop
 exercise, ExecDB gives you a full SQL engine (views, indexes, triggers,
 transactions — real SQLite, not a toy subset) with nothing to install
