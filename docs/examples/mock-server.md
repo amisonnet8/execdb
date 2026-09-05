@@ -157,7 +157,9 @@ sees your real ExecDB schema, not an empty list.
 
 ## Where these examples come from
 
-`tests/drivers/` and `tests/pgclient/` in the repository run exactly these
-kinds of connections (plus DDL-rejection, transaction, and cancellation
-checks) as part of `make test` — if you want more complete, verified
-reference code for any of these languages, that's the place to look.
+`tests/pgclient/` in this repository runs exactly this kind of Go/pgx
+connection (plus DDL-rejection, transaction, and cancellation checks) as
+part of `make test`, if you want more complete, verified reference code.
+The other languages' connections above are exercised the same way in the
+separate [`execdb-drivers`](https://github.com/amisonnet8/execdb-drivers)
+repository.

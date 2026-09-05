@@ -1,5 +1,13 @@
 # PostgreSQL互換ワイヤープロトコル
 
+> **注（2026-09-05）:** 本ファイルが参照する`tests/drivers/`配下の
+> ドライバ検証コード（Python/Node/Java/.NET/ODBC/PHP/Ruby/Rust）は、
+> 別リポジトリ[`execdb-drivers`](https://github.com/amisonnet8/execdb-drivers)
+> へ移動した（詳細は`.claude/rules/testing.md`参照）。以下の技術的な
+> 発見・バグ修正の記述自体はexecdb本体（pgwire実装）に関するものなので
+> 引き続き有効だが、本文中の`tests/drivers/...`というパス参照は移動前
+> 時点のものである。
+
 外部I/Fは独自プロトコルではなく、**PostgreSQLワイヤープロトコル(v3)のサブセット**
 を実装する。これにより既存のPostgreSQLドライバ資産（JDBC/psycopg/node-postgres/
 Npgsql/pgx等）がそのまま接続できることを狙っている。

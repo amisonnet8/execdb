@@ -75,10 +75,14 @@ execdb/
     配下の文書と同様、実際に`bin/execdb`（および`psql`）へ流し込んで実測
     検証したものをそのまま載せている。
 - **tests/**: `.claude/rules/testing.md` の `make test` が実行するE2E/結合
-  テスト一式（`e2e.sh`、他言語ドライバ確認用の `pgclient`・`drivers/` 等）。
+  テスト一式（`e2e.sh`、Go/pgxによるプロトコル検証`pgclient`）。
   **`docs/examples/`とは役割が異なる**——`tests/`はCIが自動実行する検証専用、
   `docs/examples/`は人間が読んで手元で試すための実例集（フェーズ④完了時点で
   保留にしていた「ユーザー向けサンプルをどう用意するか」という論点に対する
-  Step 9での回答）。
+  Step 9での回答）。多言語ドライバ検証（旧`tests/drivers/`）は別リポジトリ
+  [`execdb-drivers`](https://github.com/amisonnet8/execdb-drivers)へ分離済み
+  （2026-09-05、詳細は`.claude/rules/testing.md`参照）——`execdb-drivers/`が
+  このディレクトリ配下にローカルcloneされることはあるが、別リポジトリ
+  （`.gitignore`対象）であり、execdb自体のディレクトリ構造には含まれない。
 - **配布物（各OS向けビルド済みバイナリ）**: リポジトリに直接コミットしない
   （詳細は `.claude/rules/distribution.md` 参照）。

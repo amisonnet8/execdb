@@ -25,12 +25,8 @@ go.work.sum
 *.execdb_old
 /execdb_poc
 
-# tests/drivers: runtimes/dependencies fetched on demand, not committed
-# (.claude/rules/distribution.md's no-committed-binaries principle extends
-# here -- see tests/drivers/README.md).
-/tests/drivers/node/node_modules/
-/tests/drivers/java/lib/
-/tests/drivers/java/out/
-/tests/drivers/dotnet/bin/
-/tests/drivers/dotnet/obj/
-/tests/drivers/rust/target/
+# execdb-drivers: a separate git repository (github.com/amisonnet8/
+# execdb-drivers) that may be cloned into this directory for local
+# convenience (multi-language pgwire driver checks). Not part of this
+# repo's history -- see .claude/rules/testing.md.
+/execdb-drivers/

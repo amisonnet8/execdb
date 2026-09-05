@@ -377,7 +377,7 @@ db.Close()
 
 ## 8. 外部 I/F プロトコル仕様（PostgreSQL互換ワイヤープロトコル）
 
-外部 I/F は、独自プロトコルを新規に定義するのではなく、**PostgreSQLワイヤープロトコル(v3)のサブセット**を実装する方式を採用する。これにより、JDBC(pgJDBC)、Python(psycopg)、Node.js(node-postgres)、.NET(Npgsql)、Go(pgx)、ODBC(psqlODBC)、PHP(PDO_PGSQL)、Ruby(pg gem)、Rust(postgres/tokio-postgres)など、各言語・各インターフェースで既に確立されたPostgreSQL用ドライバ資産が、ExecDB側の追加対応なしにそのまま接続できる。CockroachDB・YugabyteDBなど新興分散DBが採用しているのと同じ戦略である。**pgx・pgJDBC・psycopg・node-postgres・Npgsql・psqlODBC・PDO_PGSQL・pg gem・Rustの9つすべてで、接続・SELECT/DML/トランザクション・DDL拒否が動くことを実機で確認済み（フェーズ④Step 5・7、フェーズ④完了後の追加検証、`tests/pgclient`・`tests/drivers/`）。ただしNpgsqlのみ、各ドライバ自身の「デフォルト接続設定のまま」という前提が崩れる——接続文字列に`Server Compatibility Mode=NoTypeLoading`の指定が必要（詳細は下記）。他の8つはこの種の指定なしに接続できる。psqlODBCはクライアント側の指定は不要だが、`SQLTables`/`SQLColumns`（テーブル一覧・列一覧を返すODBC標準API、Excel/Power BI/Access等が使う）まで動かすため、ExecDBサーバー側にPostgresシステムカタログ（`pg_type`/`pg_class`/`pg_namespace`/`pg_attribute`等）互換のビュー・関数を追加している（`cmd/execdb/pgcatalog.go`、詳細は`.claude/rules/pgwire.md`）。Rustの`postgres`/`tokio-postgres`クレートは独自にワイヤープロトコルを再実装しており、検証の過程でExecDB本体の潜在バグ（`Describe`と`Execute`で列のOIDが食い違う）を発見・修正した（他ドライバにも波及する修正、詳細は`.claude/rules/pgwire.md`）。**
+外部 I/F は、独自プロトコルを新規に定義するのではなく、**PostgreSQLワイヤープロトコル(v3)のサブセット**を実装する方式を採用する。これにより、JDBC(pgJDBC)、Python(psycopg)、Node.js(node-postgres)、.NET(Npgsql)、Go(pgx)、ODBC(psqlODBC)、PHP(PDO_PGSQL)、Ruby(pg gem)、Rust(postgres/tokio-postgres)など、各言語・各インターフェースで既に確立されたPostgreSQL用ドライバ資産が、ExecDB側の追加対応なしにそのまま接続できる。CockroachDB・YugabyteDBなど新興分散DBが採用しているのと同じ戦略である。**pgx・pgJDBC・psycopg・node-postgres・Npgsql・psqlODBC・PDO_PGSQL・pg gem・Rustの9つすべてで、接続・SELECT/DML/トランザクション・DDL拒否が動くことを実機で確認済み（フェーズ④Step 5・7、フェーズ④完了後の追加検証。このリポジトリ内の`tests/pgclient`と、別リポジトリ[`execdb-drivers`](https://github.com/amisonnet8/execdb-drivers)）。ただしNpgsqlのみ、各ドライバ自身の「デフォルト接続設定のまま」という前提が崩れる——接続文字列に`Server Compatibility Mode=NoTypeLoading`の指定が必要（詳細は下記）。他の8つはこの種の指定なしに接続できる。psqlODBCはクライアント側の指定は不要だが、`SQLTables`/`SQLColumns`（テーブル一覧・列一覧を返すODBC標準API、Excel/Power BI/Access等が使う）まで動かすため、ExecDBサーバー側にPostgresシステムカタログ（`pg_type`/`pg_class`/`pg_namespace`/`pg_attribute`等）互換のビュー・関数を追加している（`cmd/execdb/pgcatalog.go`、詳細は`.claude/rules/pgwire.md`）。Rustの`postgres`/`tokio-postgres`クレートは独自にワイヤープロトコルを再実装しており、検証の過程でExecDB本体の潜在バグ（`Describe`と`Execute`で列のOIDが食い違う）を発見・修正した（他ドライバにも波及する修正、詳細は`.claude/rules/pgwire.md`）。**
 
 ### 採用範囲（サブセット）
 
@@ -431,8 +431,9 @@ Npgsql固有だった。**対処: 接続文字列に`Server Compatibility Mode=N
 際にNpgsqlが公式に案内している標準機能——ExecDB独自のパッチではない）。
 これを指定するとNpgsqlは型カタログのブートストラップ自体をスキップし、
 組み込みの既知型（int4/text/bool等）だけで動作するため、この問題を
-根本的に回避できる。`tests/drivers/dotnet/run.sh`の呼び出し元
-（`tests/drivers/run-all.sh`）がこの接続文字列パラメータを付与している。
+根本的に回避できる。この接続文字列パラメータは、.NETチェックの呼び出し元
+（別リポジトリ[`execdb-drivers`](https://github.com/amisonnet8/execdb-drivers)側）
+が付与しており、チェック自体にハードコードされているわけではない。
 
 **psqlODBC（ODBC）対応で追加したpg_catalog互換ビュー（フェーズ④完了後の
 追加、実機確認で判明）:** psqlODBCは接続直後に実在のPostgresシステム

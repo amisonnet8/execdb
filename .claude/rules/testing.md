@@ -209,53 +209,35 @@ Go 1.26.7の`gofmt -s`は、**関数/型/変数などの宣言に直接紐づく
 `ps aux | grep execdb`（または該当ポートを`ss -ltnp | grep <port>`）で
 孤児プロセスの有無を確認すること。
 
-## 他言語ドライバ検証の運用方針（フェーズ④Step 7）
+## 他言語ドライバ検証は別リポジトリへ分離（2026-09-05）
 
-Python（psycopg2）・Node.js（node-postgres）・Java（pgJDBC）・.NET（Npgsql、
-当初は見送っていたが後日追加）・ODBC（psqlODBC）・PHP（PDO_PGSQL）・Ruby
-（`pg` gem）・Rust（`postgres`/`tokio-postgres`クレート）の8ドライバは、
-`tests/drivers/`配下にチェックスクリプトを置き、`tests/drivers/run-all.sh`
-（`tests/e2e.sh`とCIの`drivers`ジョブが共有する）から実行する。Bash
-（`psql`、既存のpsqlテストと重複）とTypeScript（node-postgresと同一
-パッケージ）は対応済みのものと使うものが被るため見送った。Npgsqlのみ、
-接続文字列に`Server Compatibility Mode=NoTypeLoading`が必要
-（`.claude/rules/pgwire.md`参照）——クライアント側の設定だけで見ると唯一
-「デフォルト設定のまま」では接続できない例外である。psqlODBCはクライアント
-側の設定は不要だが、`SQLTables`/`SQLColumns`まで動かすためにExecDBサーバー
-側へpg_catalog互換ビューを追加している（同参照）。PHP/Ruby/Rustはいずれも
-クライアント側の追加設定なしに接続できる。
+Python（psycopg2）・Node.js（node-postgres）・Java（pgJDBC）・.NET（Npgsql）・
+ODBC（psqlODBC）・PHP（PDO_PGSQL）・Ruby（`pg` gem）・Rust
+（`postgres`/`tokio-postgres`クレート）の8ドライバによる接続確認
+（旧・フェーズ④Step 7以降、`tests/drivers/`配下に置いていたもの）は、
+[github.com/amisonnet8/execdb-drivers](https://github.com/amisonnet8/execdb-drivers)
+という別リポジトリへ切り出した。execdb本体はネットワークI/Fを持たない
+という設計原則（§6）と同様、「execdbリポジトリ自体はGoツールチェーンだけで
+完結する」という単純さを保つのが狙い——8言語ぶんのランタイム導入は
+execdb本体のビルド・テストには一切不要なため。
 
-- **ランタイムが無い環境ではスキップする（失敗扱いにしない）。**
-  `run-all.sh`は各ランタイムを`command -v`で確認し、無ければ`skip -`行を
-  出すだけで次のドライバへ進む——フェーズ③Step 6のPTY専用Ctrl+Cチェック
-  （`script`コマンドが無い環境でスキップする）と同じ既存パターン。手元の
-  devcontainerには8つとも導入済み（Python/Node/Java/PHP/Ruby/ODBCは
-  `.devcontainer/devcontainer.json`の`postCreateCommand`、.NETは
-  `ghcr.io/devcontainers/features/dotnet:2`、Rustは
-  `ghcr.io/devcontainers/features/rust:1`フィーチャー経由——Debian標準の
-  `rustc`/`cargo`パッケージは古すぎて最近のクレートの`edition = "2024"`を
-  解釈できず不採用、フィーチャー経由でrustupベースの最新版を導入している）
-  だが、devcontainer外でリポジトリを素の状態でcloneした場合や、ランタイムの
-  導入に失敗した環境では引き続きこのスキップ挙動が効く——`make test`が
-  それだけでビルド自体を落とすことはない。ODBCのスキップ判定は`isql`
-  （unixODBCの存在確認）＋`odbcinst -q -d`が"postgresql"を含む行を返すか
-  （ドライバ自体が登録済みか）＋`python3 -c 'import pyodbc'`の3点セット。
-  Rubyは`gem install`がroot以外では`--user-install`が必要（PATHにgemの
-  binディレクトリが無い旨の警告が出るが、`require 'pg'`自体はuser-installの
-  gemを問題なく解決できるため無視してよい）。
-- **CIの`drivers`ジョブは`check`の3OSマトリクスには含めず、`ubuntu-latest`
-  限定の別ジョブにする。** pgwireプロトコル実装自体はOS非依存（`-race`と
-  同じ理由付け）であり、8ランタイム×3OSを揃えるセットアップコストに
-  見合わないと判断した。CIでは`shivammathur/setup-php`・`ruby/setup-ruby`・
-  `dtolnay/rust-toolchain`をそれぞれ使用（Rubyの`pg` gemはCIランナーでは
-  root相当のため`--user-install`無しの`gem install pg`でよい——devcontainerの
-  非rootユーザーとはこの点で条件が異なる）。
-- **Node/Javaの依存（`node_modules/`、pgJDBCのjar）はリポジトリへ
-  コミットしない。** `tests/drivers/node/run.sh`・`tests/drivers/java/run.sh`
-  が初回実行時に`npm install`／Maven Centralからの取得を自動で行う
-  （`.gitignore`でこれらのパスを除外——`.claude/rules/distribution.md`の
-  バイナリ非コミット方針の精神を、テスト専用の取得物にも適用したもの）。
-- **Debian系のシステムPython（`python3`）へ`pip install`すると
-  `externally-managed-environment`エラーになる（PEP 668）。** venvを
-  作る代わりに、apt経由の`python3-psycopg2`パッケージを使うことで
-  この制約を回避した（devcontainer/CIどちらも同じ手段）。
+execdb側に残る接続テストは`tests/pgclient`（Go、pgx）のみで、`make test`
+（`tests/e2e.sh`）・CIの`check`/`race`ジョブから変わらず実行される。
+`execdb-drivers`は独自の`go install github.com/amisonnet8/execdb/cmd/execdb@latest`
+でexecdbバイナリを取得し、自身のCIで独立して検証する
+（execdb側のCIに`drivers`ジョブは存在しない）。
+
+**ローカルでの併用方法:** `execdb-drivers`をこのリポジトリの直下へ
+`git clone`して作業することを想定し、`.gitignore`で`/execdb-drivers/`を
+除外している（別リポジトリなのでexecdb側のgit履歴には一切含まれない）。
+`.devcontainer/`には用途別の設定を3つ用意した——
+`devcontainer.execdb.json`（Go環境のみ、既定でアクティブ）と
+`devcontainer.drivers.json`（8言語ぶんのランタイムを追加）。
+`execdb-drivers/`側で作業する際は、`devcontainer.drivers.json`の内容を
+手動で`devcontainer.json`へコピーしてコンテナを再ビルドする
+（`execdb-drivers`は`execdb`と別リポジトリのため、devcontainerの自動
+切り替えは無い——手動スワップという割り切った運用）。
+
+分離前の詳細な技術的知見（各ドライバの挙動・発見したExecDB本体のバグ等）は
+`.claude/rules/pgwire.md`にそのまま残っている（execdb本体のpgwire実装に
+関する記録のため、テストコードの置き場所が変わっても有効）。

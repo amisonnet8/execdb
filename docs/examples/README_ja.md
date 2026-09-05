@@ -25,5 +25,7 @@ ExecDBのよくある使い方を、タスク指向で説明したウォーク�
   片付けも不要。
 
 より網羅的で、機械的に検証されたリファレンスコードが欲しい場合は、
-リポジトリ内の`tests/drivers/`・`tests/pgclient/`(`make test`が実行する)
-がここでの接続例の、より詳しい版に当たる。
+このリポジトリ内の`tests/pgclient/`(`make test`が実行する、Go/pgxによる
+検証)がここでの接続例の、より詳しい版に当たる。他言語(Python、Node.js、
+Java、.NET、PHP、Ruby、Rust、ODBC)ドライバの検証は別リポジトリ
+[`execdb-drivers`](https://github.com/amisonnet8/execdb-drivers)にある。

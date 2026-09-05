@@ -22,6 +22,8 @@ see [`docs/usage/`](../usage/); for the full design rationale, see
   (views/indexes/triggers/transactions) for learning or experimenting,
   nothing to install or clean up.
 
-`tests/drivers/` and `tests/pgclient/` in the repository (run by
-`make test`) are the more exhaustive, machine-checked cousins of the
-connection examples here, if you want fuller reference code.
+`tests/pgclient/` in this repository (run by `make test`) is the more
+exhaustive, machine-checked Go/pgx cousin of the connection examples here.
+Checks for other languages' drivers (Python, Node.js, Java, .NET, PHP,
+Ruby, Rust, ODBC) live in the separate
+[`execdb-drivers`](https://github.com/amisonnet8/execdb-drivers) repository.

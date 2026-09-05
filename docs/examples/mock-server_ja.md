@@ -155,7 +155,9 @@ isql -v -k "Driver=PostgreSQL Unicode;Server=127.0.0.1;Port=5432;Database=any;Ui
 
 ## この実例のもと
 
-リポジトリ内の`tests/drivers/`・`tests/pgclient/`は、`make test`の一部
-として、DDL拒否・トランザクション・キャンセルのチェックも含め、まさに
-このような接続をまとめて実行している——これらの言語について、より完全で
-検証済みのリファレンスコードが欲しい場合はそちらを参照するとよい。
+このリポジトリ内の`tests/pgclient/`は、`make test`の一部として、DDL拒否・
+トランザクション・キャンセルのチェックも含め、まさにこのGo/pgx接続を
+実行している——より完全で検証済みのリファレンスコードが欲しい場合は
+そちらを参照するとよい。上記の他言語の接続は、別リポジトリ
+[`execdb-drivers`](https://github.com/amisonnet8/execdb-drivers)で同様に
+検証されている。

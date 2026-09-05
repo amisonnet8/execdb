@@ -274,6 +274,10 @@ GitHub Actions 3OSマトリクス＋raceジョブ＋trivyがgreen／仕様書と
 どの部分に着手しているか」を都度書き残しておくと、セッションをまたいだ
 ときに文脈を復元しやすい。）*
 
+- **多言語ドライバ検証を別リポジトリ`execdb-drivers`へ分離完了
+  （2026-09-05）。** 詳細は下記「多言語ドライバ検証を別リポジトリ
+  `execdb-drivers`へ分離」節を参照。execdb本体に残る接続テストは
+  `tests/pgclient`（Go/pgx）のみになった。
 - **フェーズ④（PostgreSQL互換ワイヤープロトコル開発）完了、
   かつ当初計画していた4フェーズ（①〜④）すべてが完了（2026-09-04）。**
   詳細は下記「フェーズ④（PostgreSQL互換ワイヤープロトコル開発）完了」節・
@@ -1928,3 +1932,108 @@ Claude Code自身が読む日本語の作業指示であり、引用先の`execd
 GitHubのMarkdownアンカー生成でそのまま使われる前提）は目視で照合確認。
 `make test`は実行していない（コード変更が無いフェーズ④完了後の純粋な
 ドキュメント作業のため、小規模な修正の扱いに準じた）。
+
+## 多言語ドライバ検証を別リポジトリ`execdb-drivers`へ分離（2026-09-05）
+
+`tests/drivers/`配下の多言語ドライバ検証（Python/Node/Java/.NET/ODBC/PHP/
+Ruby/Rustの8言語）を、ユーザーとの相談のうえ別リポジトリ
+[`execdb-drivers`](https://github.com/amisonnet8/execdb-drivers)へ分離した。
+execdbリポジトリ自体は「Goツールチェーンだけで完結する」というシンプルさを
+保ち、多言語ランタイムの導入・保守はexecdb本体の開発とは独立させる、という
+判断。
+
+**進め方（ユーザーとの確認事項、すべて`AskUserQuestion`で確認済み）:**
+
+1. `execdb-drivers`リポジトリの作成・`git init`・このリポジトリ直下への
+   配置（`execdb-drivers/`、`.gitignore`対象）はユーザー側で実施。
+2. execdb側での`tests/drivers/`削除は実行してよい（git履歴には残る）。
+3. CI（`.github/workflows/test.yml`の`drivers`ジョブ）と`tests/e2e.sh`の
+   ドライバチェック呼び出しは、execdb側から完全に削除する。
+4. `execdb-drivers/`が作成・`git remote`設定済みになった時点で、
+   `tests/drivers/`の中身をそのままコピーしてexecdb-drivers側へ初回
+   コミットまで行う（execdb.gitへのpushはしない——相手リポの認証・push
+   権限はユーザー側で確認済み）。
+
+**execdb-driversのDescription（ユーザーと相談して確定）:** "Cross-language
+driver test suite for ExecDB — verifies existing PostgreSQL client
+ecosystems connect with zero ExecDB-specific setup."（execdb本体の
+Description「Portable single-binary RDBMS in Go. ...」と対になる一文と
+して、3つの候補案から選定）。
+
+**execdb-drivers側で行った適応（`tests/drivers/`からの単純コピーでは
+済まなかった点）:**
+
+- ディレクトリを1階層フラット化（`tests/drivers/python/` →
+  `execdb-drivers/python/`等、リポジトリ全体がドライバ検証専用になる
+  ため`tests/drivers/`という入れ子は不要と判断）。
+- `run-all.sh`のバイナリ解決を、`$ROOT/bin/execdb`（execdb本体を
+  `make build`した前提）から`$(go env GOPATH)/bin/execdb`
+  （`go install github.com/amisonnet8/execdb/cmd/execdb@latest`が
+  生成する場所）へ変更——`execdb-drivers`はexecdbのソースを持たないため。
+- 各スクリプト・コメント中の`tests/drivers/`という自己参照パスを除去、
+  `tests/e2e.sh`/CIの`drivers`ジョブへの言及を「run-all.sh直接実行、
+  またはこのリポジトリ自身のCI」という言い方に書き換え。
+- `.claude/rules/`への相対参照は「execdbの`.claude/rules/pgwire.md`」の
+  ようにリポジトリをまたぐ参照だと分かる形にし、実際のGitHub blob URL
+  （`github.com/amisonnet8/execdb/blob/main/...`）でリンクした
+  （execdb-driversの`README.md`/`README_ja.md`のみ。個々のソース
+  コメント内は簡略な文言に留めた）。
+- 独自の`README.md`/`README_ja.md`（トップレベルのプロジェクト説明として
+  全面書き直し、「実行方法」節を新設）・`.gitignore`（`tests/drivers/`
+  プレフィックスを外した5エントリ）・
+  `.github/workflows/test.yml`（execdb側から削除した`drivers`ジョブを
+  ベースに、`make build`→`bin/execdb`の代わりに
+  `go install .../execdb@latest`を使うよう変更）を新設。
+
+**execdb側で行った変更:**
+
+- `tests/drivers/`を削除（8言語ぶんのディレクトリ・README・
+  `run-all.sh`）。
+- `.devcontainer/`を3ファイルへ分割: `devcontainer.execdb.json`
+  （Go+trivyのみ、`dotnet`/`rust`フィーチャーと8言語ぶんの
+  `postCreateCommand`を除去）・`devcontainer.drivers.json`
+  （`execdb-drivers/`で作業する際に手動でコピーする想定、8言語ランタイム
+  一式+`dotnet`/`rust`フィーチャー）・`devcontainer.json`
+  （`devcontainer.execdb.json`と同一内容、「現在アクティブな設定」）。
+  3ファイルともJSONとしてパース可能なことを確認済み。
+- `.gitignore`: `tests/drivers/node/node_modules/`等5エントリを削除し、
+  `/execdb-drivers/`を追加（別リポジトリなのでgitに一切触らせない）。
+- `.github/workflows/test.yml`: `drivers`ジョブを削除。残るジョブは
+  `check`（3OS）・`race`（ubuntu/macos）・`trivy`のみ。YAML構文確認済み。
+- `tests/e2e.sh`: 「other-language driver checks」ブロック
+  （`tests/drivers/run-all.sh`の呼び出しとその前後のコメント）を削除。
+  前後の`tests/pgclient`チェック・`-u`認証チェックはそのまま。bash構文
+  確認済み。
+- `.claude/rules/testing.md`: 末尾の「他言語ドライバ検証の運用方針
+  （フェーズ④Step 7）」セクション全体を、分離の経緯・execdb-driversへの
+  リンク・ローカルでの併用方法（devcontainer手動スワップ）を説明する
+  短い節へ置き換え。
+- `.claude/rules/pgwire.md`: タイトル直下に、`tests/drivers/`配下の
+  ドライバ検証コードが`execdb-drivers`へ移動した旨の注記を追加（本文の
+  詳細な技術的発見・バグ修正の記述自体はexecdb本体のpgwire実装に関する
+  ものなので書き換えていない——`execdb-drivers`側の内部構成を把握して
+  いないため、個々のパス参照を正確に書き換えることはできない、という
+  判断）。
+- `.claude/rules/directory-structure.md`: `tests/`の補足説明から
+  `drivers/`の列挙を削り、`execdb-drivers`が別リポジトリとして
+  ローカルcloneされうる（gitignore対象、execdb自体のディレクトリ構造には
+  含まれない）旨を追記。
+- `tests/README.md`/`README_ja.md`・`docs/examples/README.md`/
+  `README_ja.md`・`docs/examples/mock-server.md`/`mock-server_ja.md`・
+  `docs/spec/execdb_spec.md`/`execdb_spec_ja.md`: `tests/drivers/`への
+  言及を、`tests/pgclient`のみの紹介＋別リポジトリ`execdb-drivers`への
+  実リンクへ更新（分離前は「リポジトリが存在しないためリンクを貼らない」
+  方針だったが、この時点で`execdb-drivers`が実在・`git remote`確認済み
+  だったため、実際のURLをそのまま使用）。
+
+過去の`tests/drivers`関連の履歴的な記述（フェーズ④Step 7以降の各追加
+ドライバ導入の経緯、PLAN.md中の該当各節）はそのまま残した——実際に当時
+あったことの正確な記録のため。
+
+**確認**: `make check`（fmt-check/vet/check-deps/unit）green。
+`tests/e2e.sh`・`.github/workflows/test.yml`はbash/YAML構文確認済み
+（`tests/drivers/`自体を削除済みのため、参照が万一残っていれば
+`make test`実行時にこの場で検知できる状態）。`git status`で
+`execdb-drivers/`がgit管理下に一切現れないこと、`tests/drivers/`が
+削除対象になっていることを確認。execdb-drivers側は独立した`git`
+リポジトリとして初回コミット済み（push・タグ操作は今回未実施）。
